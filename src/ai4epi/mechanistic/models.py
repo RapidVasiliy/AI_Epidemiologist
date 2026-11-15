@@ -24,6 +24,24 @@ import numpy as np
 # Профиль заразности (g_0, ..., g_7) из Influenza_bulletin и статьи Лазутова и др.
 DEFAULT_INFECTIVITY_PROFILE: tuple[float, ...] = (0.1, 0.1, 1.0, 0.9, 0.55, 0.3, 0.15, 0.05)
 
+# Матрица контактов 0–14 / 15+ из RSCF_Uncertainty (BaroyanAgeMultistrain_v2,
+# ``contact_matrix_2_age_groups.p``): строка — заражаемая группа, столбец — источник,
+# как в ``BR_model_new.BRModel`` (сила инфекции группы i: Σ_j λ·M[i][j]·I_j / ρ).
+RSCF_CONTACT_MATRIX_2: tuple[tuple[float, float], ...] = (
+    (8.55577786, 5.87935504),
+    (0.55266746, 4.65762732),
+)
+
+
+def normalized_contact_matrix(matrix: Sequence[Sequence[float]]) -> np.ndarray:
+    """Матрица, делённая на спектральный радиус (масштаб задаётся отдельным множителем)."""
+
+    m = np.asarray(matrix, dtype=float)
+    radius = float(np.max(np.abs(np.linalg.eigvals(m))))
+    if not radius > 0:
+        raise ValueError("Спектральный радиус матрицы контактов должен быть положительным.")
+    return m / radius
+
 
 @dataclass
 class ModelParams:
@@ -88,6 +106,29 @@ class BaroyanRvachevModel:
     def simulate(self, params: ModelParams, duration_days: int) -> SimulationResult:  # pragma: no cover
         raise NotImplementedError
 
+    def contact(self, params: ModelParams) -> np.ndarray:
+        """Матрица интенсивностей передачи B (groups × groups)."""
+
+        return np.asarray(params.beta, dtype=float).reshape(self.groups, self.groups)
+
+    def reproduction_number(self, params: ModelParams, sim: SimulationResult) -> np.ndarray:
+        """Эффективное репродуктивное число R_t по суткам.
+
+        Один заражённый группы i за время болезни создаёт силу инфекции B[j, i]·g_τ/ρ
+        для каждого восприимчивого группы j, поэтому матрица следующего поколения
+        K_t[j, i] = S^j_t · B[j, i] · Σg / ρ, а R_t — её спектральный радиус
+        (для одной группы R_t = β · S_t · Σg / ρ). Насыщение min(·, S) не учитывается.
+        """
+
+        b = self.contact(params)
+        s = np.asarray(sim.susceptible, dtype=float)
+        k = float(self.g.sum()) / float(params.population_size)
+        out = np.empty(s.shape[1])
+        for day in range(s.shape[1]):
+            ngm = s[:, day][:, None] * b * k
+            out[day] = float(np.max(np.abs(np.linalg.eigvals(ngm)))) if ngm.shape[0] > 1 else float(ngm[0, 0])
+        return out
+
     def _infected(self, newly: np.ndarray, day: int) -> float:
         lo = max(0, day - len(self.g) + 1)
         window = newly[lo : day + 1][::-1]
@@ -135,6 +176,10 @@ class AgeGroupBRModel(BaroyanRvachevModel):
     ``beta`` задаёт матрицу контактов B построчно: ``beta[2*j + i]`` —
     интенсивность заражения группы j от инфицированных группы i.
 
+    Если задана внешняя ``contact_matrix`` M (например, ``RSCF_CONTACT_MATRIX_2``), её структура
+    фиксируется: B = beta[0] · M / r(M), где r(M) — спектральный радиус, и калибруется один
+    масштабный множитель вместо четырёх коэффициентов.
+
     Если ``alpha_0 = alpha_1 = alpha`` и все элементы B равны ``beta``, сумма
     групп совпадает с ``TotalBRModel`` (с точностью до округления S_0 вниз).
 
@@ -148,13 +193,30 @@ class AgeGroupBRModel(BaroyanRvachevModel):
     beta_dim = 4
     name = "age"
 
+    def __init__(
+        self,
+        infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE,
+        contact_matrix: Sequence[Sequence[float]] | None = None,
+    ) -> None:
+        super().__init__(infectivity_profile)
+        self.contact_structure = None if contact_matrix is None else normalized_contact_matrix(contact_matrix)
+        if self.contact_structure is not None:
+            if self.contact_structure.shape != (self.groups, self.groups):
+                raise ValueError("Матрица контактов должна быть 2×2.")
+            self.beta_dim = 1
+
+    def contact(self, params: ModelParams) -> np.ndarray:
+        if self.contact_structure is not None:
+            return float(params.beta[0]) * self.contact_structure
+        return super().contact(params)
+
     def simulate(self, params: ModelParams, duration_days: int) -> SimulationResult:
         if params.group_population_sizes is None or len(params.group_population_sizes) != self.groups:
             raise ValueError("AgeGroupBRModel требует group_population_sizes для двух групп.")
         rho_g = np.asarray(params.group_population_sizes, dtype=float)
         rho = float(rho_g.sum())
         alpha = np.asarray(params.alpha, dtype=float)
-        contact = np.asarray(params.beta, dtype=float).reshape(self.groups, self.groups)
+        contact = self.contact(params)
         i0 = np.asarray(params.initial_infectious, dtype=float)
 
         newly = np.zeros((self.groups, duration_days))
@@ -173,23 +235,25 @@ class AgeGroupBRModel(BaroyanRvachevModel):
         return SimulationResult(newly, infected, susceptible)
 
 
-def get_model(kind: str) -> BaroyanRvachevModel:
-    """``"total"`` или ``"age"`` -> экземпляр модели."""
+def get_model(kind: str, *, contact_matrix: Sequence[Sequence[float]] | None = None) -> BaroyanRvachevModel:
+    """``"total"`` или ``"age"`` -> экземпляр модели (``contact_matrix`` — только для ``"age"``)."""
 
     match kind:
         case "total":
             return TotalBRModel()
         case "age":
-            return AgeGroupBRModel()
+            return AgeGroupBRModel(contact_matrix=contact_matrix)
     raise ValueError(f"Неизвестный тип модели Барояна–Рвачёва: {kind!r} (ожидается 'total' или 'age').")
 
 
 __all__ = [
     "DEFAULT_INFECTIVITY_PROFILE",
+    "RSCF_CONTACT_MATRIX_2",
     "AgeGroupBRModel",
     "BaroyanRvachevModel",
     "ModelParams",
     "SimulationResult",
     "TotalBRModel",
     "get_model",
+    "normalized_contact_matrix",
 ]

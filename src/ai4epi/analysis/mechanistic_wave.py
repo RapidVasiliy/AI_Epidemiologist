@@ -33,11 +33,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai4epi.core.io import TableWriteOptions, write_json, write_table
 from ai4epi.mechanistic import (
+    RSCF_CONTACT_MATRIX_2,
     CalibrationResult,
     ModelParams,
     calibrate,
     get_model,
     model_observable,
+    negative_binomial_noise,
     r2_score_np,
 )
 
@@ -77,6 +79,7 @@ ALLOWED_CLAIMS: list[str] = [
     "оценка недели завершения основной волны, если она лежит в пределах горизонта моделирования",
     "согласие или расхождение направления прогнозов механистической модели и модели машинного обучения",
     "качество описания наблюдаемой части волны (R² на калибровочном участке)",
+    "эффективное репродуктивное число R_t по модели и его диапазон по пучку траекторий",
 ]
 FORBIDDEN_CLAIMS: list[str] = [
     "усреднять прогнозы двух моделей или выдавать значения модели Барояна–Рвачёва за основной количественный прогноз",
@@ -84,6 +87,7 @@ FORBIDDEN_CLAIMS: list[str] = [
     "интерпретировать alpha как долю восприимчивых во всём населении",
     "делать причинные выводы о смене штамма, вакцинации или мерах контроля",
     "называть R² на калибровочном участке точностью прогноза",
+    "называть R_t модели измеренной величиной или сравнивать его с R_0 других болезней",
 ]
 
 
@@ -109,7 +113,7 @@ class MechanisticWaveConfig(StrictModel):
     ``season_start_week`` (так считались рисунки статьи для РФ, 35-я неделя).
     """
 
-    method: Literal["mcmc", "abc", "optuna", "annealing"] = "mcmc"
+    method: Literal["mcmc", "abc", "optuna", "annealing", "bootstrap"] = "mcmc"
     season_start_week: int = Field(default=35, ge=1, le=53)
     calibration_start: Literal["wave_onset", "season_start"] = "wave_onset"
     onset_lead_weeks: int = Field(default=2, ge=0, le=12)
@@ -141,6 +145,13 @@ class MechanisticWaveConfig(StrictModel):
     # (шаг 7 схемы статьи), поэтому согласие не оценивается.
     agreement_skip_post_wave: bool = True
     rhat_threshold: float = Field(default=1.05, gt=1.0)
+    # --- бутстреп (method="bootstrap", как в RSCF_Uncertainty) ---------------
+    # Число синтетических рядов (= число траекторий пучка). Полоса q05–q95:
+    # "predictive" — траектории перекалиброванных параметров + шум наблюдений
+    # с дисперсией остатков (интервал для будущих наблюдений); "parameter" —
+    # только неопределённость параметров (кривые модели).
+    bootstrap_replicates: int = Field(default=100, ge=5)
+    bootstrap_band: Literal["predictive", "parameter"] = "predictive"
     round_digits: int = Field(default=3, ge=0, le=8)
     # --- возрастная модель (0–14 / 15+), см. AgeGroupBRModel ---------------
     # Недоучёт различается по возрастам: дети регистрируются почти полностью
@@ -159,6 +170,16 @@ class MechanisticWaveConfig(StrictModel):
     age_tune: int = Field(default=5000, ge=0)
     age_draws: int = Field(default=2000, ge=10)
     age_best_estimate: Literal["mean", "min_distance"] = "min_distance"
+    # "matrix": структура контактов фиксирована внешней матрицей (RSCF_Uncertainty,
+    # 0–14 / 15+), калибруется один масштабный множитель (3 параметра вместо 6);
+    # "free": четыре свободных коэффициента матрицы.
+    age_contact_structure: Literal["matrix", "free"] = "matrix"
+    age_contact_matrix: tuple[tuple[float, float], tuple[float, float]] = RSCF_CONTACT_MATRIX_2
+    # Внешняя матрица описывает контакты между *всеми* инфицированными, а в модели
+    # группа i содержит лишь регистрируемую долю kappa_i заражённых. Поэтому столбец
+    # источника i делится на kappa_i (истинное число заразных = I_i / kappa_i).
+    age_contact_kappa_correction: bool = True
+    age_matrix_scale_upper: float = Field(default=3.0, gt=0.0)
 
 
 class MechanisticWaveOutputConfig(StrictModel):
@@ -285,7 +306,7 @@ def run_mechanistic_wave_analysis(
         method=cfg.method,
         observation_scale=per_10k if cfg.observation_scale == "per_10k" else 1.0,
         epsilon=cfg.epsilon,
-        n_samples=cfg.n_trajectories,
+        n_samples=cfg.bootstrap_replicates if cfg.method == "bootstrap" else cfg.n_trajectories,
         tune=cfg.tune,
         draws=cfg.draws,
         chains=cfg.chains,
@@ -295,7 +316,13 @@ def run_mechanistic_wave_analysis(
     )
 
     trajectories, bundle = build_trajectories(
-        model, calibration, window, per_10k=per_10k, projection_weeks=cfg.projection_weeks
+        model,
+        calibration,
+        window,
+        per_10k=per_10k,
+        projection_weeks=cfg.projection_weeks,
+        band=cfg.bootstrap_band,
+        random_seed=cfg.random_seed,
     )
     block, warnings = build_mechanistic_wave_context(
         trajectories,
@@ -383,16 +410,23 @@ def build_trajectories(
     *,
     per_10k: float,
     projection_weeks: int,
+    band: Literal["predictive", "parameter"] = "predictive",
+    random_seed: int | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray | None]:
-    """Центральная траектория и квантили пучка на 10 тыс. населения.
+    """Центральная траектория, квантили пучка (на 10 тыс.) и R_t.
 
-    Возвращает таблицу и матрицу пучка ``(n_trajectories, n_weeks)`` (или None
-    для точечных методов калибровки).
+    Возвращает таблицу и матрицу пучка кривых модели ``(n_trajectories, n_weeks)``
+    (или None для точечных методов калибровки). Для бутстрепа при
+    ``band="predictive"`` квантили ``q05``/``q50``/``q95`` строятся по кривым с
+    добавленным шумом наблюдений (дисперсия остатков калибровки); пучок кривых модели
+    (для оценки пика) возвращается без шума. ``r_t`` — эффективное репродуктивное
+    число центральной траектории на начало недели, ``r_t_q05``/``r_t_q95`` — по пучку.
     """
 
     n_obs = len(window)
     n_total = n_obs + projection_weeks
     best = model_observable(model, calibration.best_params, n_total) * per_10k
+    r_best = weekly_reproduction_number(model, calibration.best_params, n_total)
     dates = pd.date_range(window["datetime"].iloc[0], periods=n_total, freq="7D")
     df = pd.DataFrame(
         {
@@ -401,14 +435,63 @@ def build_trajectories(
             "is_projection": np.arange(n_total) >= n_obs,
             "observed": np.concatenate([window["inc_per_10k"].to_numpy(float), np.full(projection_weeks, np.nan)]),
             "best": best,
+            "r_t": r_best,
         }
     )
     bundle: np.ndarray | None = None
     if calibration.has_bundle:
-        bundle = np.vstack([model_observable(model, p, n_total) * per_10k for p in calibration.sample_params()])
+        params = calibration.sample_params()
+        bundle = np.vstack([model_observable(model, p, n_total) * per_10k for p in params])
+        banded = bundle
+        variance = calibration.diagnostics.get("residual_variance")
+        if calibration.method == "bootstrap" and band == "predictive" and variance:
+            rng = np.random.default_rng(random_seed)
+            banded = negative_binomial_noise(bundle / per_10k, float(variance[0]), rng) * per_10k
         for q in (5, 50, 95):
-            df[f"q{q:02d}"] = np.percentile(bundle, q, axis=0)
+            df[f"q{q:02d}"] = np.percentile(banded, q, axis=0)
+        r_bundle = np.vstack([weekly_reproduction_number(model, p, n_total) for p in params])
+        df["r_t_q05"] = np.percentile(r_bundle, 5, axis=0)
+        df["r_t_q95"] = np.percentile(r_bundle, 95, axis=0)
     return df, bundle
+
+
+def weekly_reproduction_number(model: Any, params: ModelParams, n_weeks: int) -> np.ndarray:
+    """R_t модели на первый день каждой недели (см. ``BaroyanRvachevModel.reproduction_number``)."""
+
+    sim = model.simulate(params, n_weeks * 7)
+    return model.reproduction_number(params, sim)[::7][:n_weeks]
+
+
+def reproduction_number_block(
+    trajectories: pd.DataFrame,
+    last_idx: int,
+    round_digits: int,
+) -> JsonObject:
+    """Сводка R_t: на последней наблюдаемой неделе, максимум и неделя перехода через 1."""
+
+    r = trajectories["r_t"].to_numpy(float)
+    dates = pd.to_datetime(trajectories["datetime"])
+    below = np.nonzero(r < 1.0)[0]
+    first_below = int(below[0]) if len(below) else None
+    current = float(r[last_idx])
+    out: JsonObject = {
+        "current": round(current, round_digits),
+        "current_date": dates.iloc[last_idx].date().isoformat(),
+        "current_q05": None,
+        "current_q95": None,
+        "max": round(float(np.max(r)), round_digits),
+        "below_one_from_date": dates.iloc[first_below].date().isoformat() if first_below is not None else None,
+        "below_one_already": bool(first_below is not None and first_below <= last_idx),
+        "note": (
+            "R_t — эффективное репродуктивное число модели (среднее число заражений от одного больного при "
+            "текущем запасе восприимчивых); R_t < 1 означает спад заболеваемости по модели. Это величина модели, "
+            "а не прямое измерение."
+        ),
+    }
+    if "r_t_q05" in trajectories:
+        out["current_q05"] = round(float(trajectories["r_t_q05"].iloc[last_idx]), round_digits)
+        out["current_q95"] = round(float(trajectories["r_t_q95"].iloc[last_idx]), round_digits)
+    return out
 
 
 def build_mechanistic_wave_context(
@@ -479,6 +562,7 @@ def build_mechanistic_wave_context(
         "method": calibration.method,
         "method_ru": _method_ru(calibration.method),
         "n_trajectories": len(calibration.alpha_samples),
+        "band_type": _band_type(calibration, cfg),
         "fit_r2_in_sample": round(float(fit_r2), 3),
         "fit_r2_note": "R² рассчитан на данных калибровочного участка и характеризует описание уже наблюдаемой части волны, а не точность прогноза.",
         "phase_code": phase,
@@ -489,11 +573,13 @@ def build_mechanistic_wave_context(
         "horizons": horizons,
         "comparison_with_ml": comparison,
         "parameters": parameters,
+        "reproduction_number": reproduction_number_block(trajectories, last_idx, rd),
         "diagnostics": {
             "r_hat_max": rhat,
             "ess_bulk_min": diag.get("ess_bulk_min"),
             "converged": converged,
             "sampler": diag.get("sampler"),
+            "residual_sd_cases": diag.get("residual_sd"),
         },
         "allowed_claims": list(ALLOWED_CLAIMS),
         "forbidden_claims": list(FORBIDDEN_CLAIMS),
@@ -506,9 +592,22 @@ def build_mechanistic_wave_context(
             "peak_already_passed": peak_block["already_passed"],
             "wave_end_within_projection": wave_end["within_projection"],
             "converged": converged,
+            "r_t_below_one": block_r_t_below_one(trajectories, last_idx),
         },
     }
     return block, warnings
+
+
+def block_r_t_below_one(trajectories: pd.DataFrame, last_idx: int) -> bool:
+    return bool(float(trajectories["r_t"].iloc[last_idx]) < 1.0)
+
+
+def _band_type(calibration: CalibrationResult, cfg: MechanisticWaveConfig) -> str | None:
+    if not calibration.has_bundle:
+        return None
+    if calibration.method == "bootstrap":
+        return "predictive" if cfg.bootstrap_band == "predictive" else "parameter"
+    return "posterior"
 
 
 def summarize_wave(
@@ -694,10 +793,16 @@ def run_age_group_mechanistic(
         scale = [1.0 / max(float(f["total_cases_formula"].max()), 1.0) for f in frames]
     else:
         scale = [10_000.0 / n for n in populations]
-    model = get_model("age")
+    use_matrix = cfg.age_contact_structure == "matrix"
+    contact_matrix = None
+    if use_matrix:
+        contact_matrix = np.asarray(cfg.age_contact_matrix, dtype=float)
+        if cfg.age_contact_kappa_correction:
+            contact_matrix = contact_matrix / np.asarray(cfg.age_underreporting_kappa, dtype=float)[None, :]
+    model = get_model("age", contact_matrix=contact_matrix)
     template = ModelParams(
         alpha=[0.0, 0.0],
-        beta=[0.0] * 4,
+        beta=[0.0] * model.params_dims()[1],
         population_size=int(sum(rho_g)),
         initial_infectious=list(cfg.age_initial_infectious),
         group_population_sizes=rho_g,
@@ -709,8 +814,8 @@ def run_age_group_mechanistic(
         method=cfg.method,
         observation_scale=scale,
         epsilon=cfg.age_epsilon,
-        beta_upper=cfg.age_beta_upper,
-        n_samples=cfg.n_trajectories,
+        beta_upper=cfg.age_matrix_scale_upper if use_matrix else cfg.age_beta_upper,
+        n_samples=cfg.bootstrap_replicates if cfg.method == "bootstrap" else cfg.n_trajectories,
         tune=cfg.age_tune,
         draws=cfg.age_draws,
         chains=cfg.chains,
@@ -726,10 +831,18 @@ def run_age_group_mechanistic(
     per_10k = np.array([10_000.0 / n for n in populations])[:, None]
     best = model_observable(model, calibration.best_params, n_total).reshape(2, -1) * per_10k
     bundle = None
+    banded = None
     if calibration.has_bundle:
         bundle = np.stack(
             [model_observable(model, p, n_total).reshape(2, -1) * per_10k for p in calibration.sample_params()]
         )  # (n, groups, weeks)
+        banded = bundle
+        variance = calibration.diagnostics.get("residual_variance")
+        if calibration.method == "bootstrap" and cfg.bootstrap_band == "predictive" and variance:
+            rng = np.random.default_rng(cfg.random_seed)
+            var = np.asarray(variance, dtype=float)[None, :, None]
+            banded = negative_binomial_noise(bundle / per_10k[None], var * np.ones_like(bundle), rng) * per_10k[None]
+    r_t = weekly_reproduction_number(model, calibration.best_params, n_total)
     dates = pd.Series(pd.date_range(frames[0]["datetime"].iloc[0], periods=n_total, freq="7D"))
 
     rows = []
@@ -737,8 +850,9 @@ def run_age_group_mechanistic(
     for g, code in enumerate(codes):
         obs_g = frames[g]["inc_per_10k"].to_numpy(float)
         bundle_g = bundle[:, g, :] if bundle is not None else None
-        q05 = np.percentile(bundle_g, 5, axis=0) if bundle_g is not None else None
-        q95 = np.percentile(bundle_g, 95, axis=0) if bundle_g is not None else None
+        band_g = banded[:, g, :] if banded is not None else None
+        q05 = np.percentile(band_g, 5, axis=0) if band_g is not None else None
+        q95 = np.percentile(band_g, 95, axis=0) if band_g is not None else None
         phase, peak, wave_end = summarize_wave(best[g], bundle_g, dates, last_idx, cfg)
         horizons, comparison, cmp_w = compare_with_ml(
             float(obs_g[-1]), best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg, phase=phase
@@ -777,8 +891,11 @@ def run_age_group_mechanistic(
     rhat = diag.get("r_hat_max")
     converged = None if rhat is None else bool(rhat <= cfg.rhat_threshold)
     if converged is False:
-        warnings.append(f"MCMC: R-hat = {rhat:.2f} > {cfg.rhat_threshold}; оценки матрицы контактов ненадёжны.")
-    contact = np.asarray(calibration.best_params.beta, dtype=float).reshape(2, 2)
+        warnings.append(
+            f"MCMC: R-hat = {rhat:.2f} > {cfg.rhat_threshold}; "
+            + ("оценки параметров возрастной модели ненадёжны." if use_matrix else "оценки матрицы контактов ненадёжны.")
+        )
+    contact = model.contact(calibration.best_params)
     block: JsonObject = {
         "model_name_ru": "возрастная модель Барояна–Рвачёва (0–14 и 15+ лет)",
         "groups": groups_out,
@@ -787,10 +904,16 @@ def run_age_group_mechanistic(
         "underreporting_kappa": list(cfg.age_underreporting_kappa),
         "alpha": [round(float(a), rd + 1) for a in calibration.best_params.alpha],
         "contact_matrix": [[round(float(v), rd) for v in row] for row in contact],
+        "contact_structure": cfg.age_contact_structure,
         "contact_matrix_note": (
-            "строка — заражаемая группа, столбец — источник; матрица плохо идентифицируема по двум недельным "
+            "строка — заражаемая группа, столбец — источник; структура матрицы задана внешней матрицей контактов "
+            "(RSCF_Uncertainty) с поправкой на недоучёт по группам, по данным оценён только общий масштаб"
+            if use_matrix
+            else "строка — заражаемая группа, столбец — источник; матрица плохо идентифицируема по двум недельным "
             "рядам, интерпретировать стоит фазы и максимумы групп, а не отдельные коэффициенты"
         ),
+        "reproduction_number_current": round(float(r_t[last_idx]), rd),
+        "band_type": _band_type(calibration, cfg),
         "residual_scale": cfg.age_residual_scale,
         "diagnostics": {"r_hat_max": rhat, "ess_bulk_min": diag.get("ess_bulk_min"), "converged": converged},
         "semantic": {
@@ -896,6 +1019,7 @@ def _method_ru(method: str) -> str:
         "abc": "байесовская оценка (ABC-ядро, SMC)",
         "optuna": "оптимизация R² (Optuna)",
         "annealing": "оптимизация R² (двойной отжиг)",
+        "bootstrap": "параметрический бутстреп (отрицательно-биномиальный шум, перекалибровка)",
     }[method]
 
 

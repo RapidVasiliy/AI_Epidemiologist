@@ -382,7 +382,7 @@ If `--end-date` is omitted, the workflow uses the latest available surveillance 
 
 ### Offline run from local xlsx data
 
-`data/regions/<city>/{cases,pcr}.xlsx` (Saint Petersburg, Samara, Chelyabinsk, 2010 – Oct/Nov 2024) can be used without network access. Without a weather table the forecasting model is built without weather features.
+`data/regions/<city>/{cases,pcr}.xlsx` can be used without network access: Saint Petersburg, Samara, Chelyabinsk (2010 – Oct/Nov 2024) and Moscow, Novosibirsk, Omsk, Voronezh, Krasnodar (2010 – Jan/Feb 2021, converted from the raw RSCF_Uncertainty files with `scripts/convert_raw_regions.py`). `data/national/age_pcr_2017w40_2018w39.csv` holds age-specific PCR results for season 2017/18 (55 cities); where available, age-group series use age-specific positivity (see [docs/age_groups.md](docs/age_groups.md)). Without a weather table the forecasting model is built without weather features.
 
 ```bash
 ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --br-age-groups --age-forecast --output-dir runs/spb_2019w04/analysis

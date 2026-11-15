@@ -512,6 +512,9 @@ MECHANISTIC_WAVE_PROMPT = (
     "волны и её определение (wave_end.definition); иначе напиши, что завершение за пределами горизонта "
     "моделирования. Если early_phase_caution=true, явно укажи, что оценки на ранней фазе роста ориентировочные. "
     "Упомяни R² на калибровочном участке только как характеристику описания наблюдаемой части волны. "
+    "Если задано reproduction_number, укажи текущее значение R_t по модели (reproduction_number.current, "
+    "с диапазоном current_q05–current_q95, если они заданы) и что R_t < 1 означает спад по модели; "
+    "называй его оценкой модели, а не измеренной величиной. "
     "АБЗАЦ 2 (comparison_text): сопоставь направление прогнозов двух моделей на горизонте четырёх недель "
     "(comparison_with_ml.br_direction и ml_direction). Если agreement_code='agree', напиши, что прогнозы "
     "согласуются: количественный прогноз на ближайшие недели даёт модель машинного обучения, а фазу и "
@@ -663,6 +666,8 @@ def default_section_configs() -> list[SectionConfig]:
                 "horizons": "mechanistic_wave.horizons",
                 "comparison_with_ml": "mechanistic_wave.comparison_with_ml",
                 "diagnostics": "mechanistic_wave.diagnostics",
+                "reproduction_number": "mechanistic_wave.reproduction_number",
+                "band_type": "mechanistic_wave.band_type",
                 "allowed_claims": "mechanistic_wave.allowed_claims",
                 "forbidden_claims": "mechanistic_wave.forbidden_claims",
                 "semantic": "mechanistic_wave.semantic",
@@ -672,6 +677,7 @@ def default_section_configs() -> list[SectionConfig]:
                 "expected_numbers": [
                     {"label": "величина максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.value", "required": True},
                     {"label": "неделя максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.iso_week", "required": False},
+                    {"label": "эффективное репродуктивное число R_t по модели", "path": "mechanistic_wave.reproduction_number.current", "required": False},
                 ],
                 "editor_field_roles": {
                     "phase_text": "абзац о фазе эпидемической волны, сроке и величине максимума по механистической модели",

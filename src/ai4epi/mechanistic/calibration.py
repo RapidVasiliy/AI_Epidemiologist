@@ -7,7 +7,14 @@
   сэмплер ``DEMetropolisZ`` (основной метод статьи Лазутова и др.);
 * ``abc`` — тот же симулятор, sequential Monte Carlo (``pm.sample_smc``);
 * ``optuna`` — максимизация R² (TPE);
-* ``annealing`` — максимизация R² (``scipy.optimize.dual_annealing``).
+* ``annealing`` — максимизация R² (``scipy.optimize.dual_annealing``);
+* ``bootstrap`` — параметрический бутстреп, как в RSCF_Uncertainty
+  (``BaroyanAgeMultistrain_v2/bootstrapping``): точечная оценка (минимум невязки,
+  ``dual_annealing``), затем ``n_samples`` синтетических рядов «модель +
+  отрицательно-биномиальный шум» с дисперсией, оценённой по остаткам каждой группы,
+  и перекалибровка на каждом (Нелдер–Мид от точечной оценки). Разброс
+  перекалиброванных параметров даёт пучок траекторий; дисперсия шума
+  (``diagnostics["residual_variance"]``) позволяет построить предсказательный интервал.
 
 Априорные распределения: U[0, 1] для всех компонент alpha и beta.
 
@@ -36,9 +43,9 @@ import numpy as np
 
 from ai4epi.mechanistic.models import BaroyanRvachevModel, ModelParams
 
-CalibrationMethod = Literal["mcmc", "abc", "optuna", "annealing"]
+CalibrationMethod = Literal["mcmc", "abc", "optuna", "annealing", "bootstrap"]
 TimeStep = Literal["week", "day"]
-CALIBRATION_METHODS: tuple[str, ...] = ("mcmc", "abc", "optuna", "annealing")
+CALIBRATION_METHODS: tuple[str, ...] = ("mcmc", "abc", "optuna", "annealing", "bootstrap")
 
 
 class CalibrationError(RuntimeError):
@@ -180,6 +187,29 @@ def calibrate(
             diagnostics=diagnostics,
         )
 
+    if method == "bootstrap":
+        x, alpha_s, beta_s, diagnostics = _bootstrap(
+            observable,
+            data,
+            scale,
+            alpha_dim=alpha_dim,
+            beta_dim=beta_dim,
+            n_replicates=n_samples,
+            random_seed=random_seed,
+            alpha_upper=alpha_upper,
+            beta_upper=beta_upper,
+        )
+        return CalibrationResult(
+            method=method,
+            best_params=template.with_values(x[:alpha_dim], x[alpha_dim:]),
+            alpha_samples=alpha_s,
+            beta_samples=beta_s,
+            template=template,
+            observation_scale=float(scale_per_group[0]) if alpha_dim == 1 else scale_per_group.tolist(),
+            epsilon=None,
+            diagnostics=diagnostics,
+        )
+
     x, score = (_optuna if method == "optuna" else _annealing)(
         observable,
         scaled,
@@ -312,6 +342,84 @@ def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, 
     return np.asarray(res.x, dtype=float), float(-res.fun)
 
 
+def negative_binomial_noise(
+    mean: np.ndarray,
+    variance: np.ndarray | float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Отрицательно-биномиальные отсчёты с заданными средним и дисперсией.
+
+    Как ``TruncatedNegativeBinomial.get_random_value_mv`` из RSCF_Uncertainty, но без
+    усечения нуля; если дисперсия не больше среднего — пуассоновские отсчёты.
+    """
+
+    mean = np.clip(np.asarray(mean, dtype=float), 0.0, None)
+    var = np.broadcast_to(np.asarray(variance, dtype=float), mean.shape)
+    out = np.zeros_like(mean)
+    over = (mean > 0) & (var > mean * (1 + 1e-9))
+    p = mean[over] / var[over]
+    n = mean[over] * p / (1.0 - p)
+    out[over] = rng.negative_binomial(n, p)
+    pois = (mean > 0) & ~over
+    out[pois] = rng.poisson(mean[pois])
+    return out
+
+
+def _bootstrap(
+    observable,
+    data: np.ndarray,
+    scale: np.ndarray,
+    *,
+    alpha_dim: int,
+    beta_dim: int,
+    n_replicates: int,
+    random_seed: int | None,
+    alpha_upper: float,
+    beta_upper: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    from scipy.optimize import dual_annealing, minimize
+
+    bounds = [(0.0, alpha_upper)] * alpha_dim + [(0.0, beta_upper)] * beta_dim
+    scaled = data * scale
+
+    def sse(x, target):
+        return float(np.sum((observable(x[:alpha_dim], x[alpha_dim:]) - target) ** 2))
+
+    point = dual_annealing(sse, bounds=bounds, args=(scaled,), seed=random_seed, maxiter=300)
+    x0 = np.asarray(point.x, dtype=float)
+    fitted = observable(x0[:alpha_dim], x0[alpha_dim:]) / scale  # в отсчётах
+    n_steps = len(data) // alpha_dim
+    resid = (data - fitted).reshape(alpha_dim, n_steps)
+    variance_g = resid.var(axis=1, ddof=min(1, n_steps - 1))
+    variance = np.repeat(variance_g, n_steps)
+
+    rng = np.random.default_rng(random_seed)
+    samples: list[np.ndarray] = []
+    failed = 0
+    for _ in range(n_replicates):
+        synthetic = negative_binomial_noise(fitted, variance, rng) * scale
+        res = minimize(sse, x0, args=(synthetic,), method="Nelder-Mead", bounds=bounds,
+                       options={"maxfev": 400 * len(x0), "xatol": 1e-4, "fatol": 1e-8})
+        if not np.all(np.isfinite(res.x)):
+            failed += 1
+            continue
+        samples.append(np.asarray(res.x, dtype=float))
+    arr = np.asarray(samples, dtype=float).reshape(-1, alpha_dim + beta_dim)
+    ss_tot = float(np.sum((scaled - scaled.mean()) ** 2))
+    diagnostics = {
+        "sampler": "parametric bootstrap (negative binomial noise)",
+        "replicates": n_replicates,
+        "failed_refits": failed,
+        "point_fit_r2": 1.0 - float(point.fun) / ss_tot if ss_tot > 0 else None,
+        "residual_variance": [float(v) for v in variance_g],
+        "residual_sd": [float(np.sqrt(v)) for v in variance_g],
+        "parameter_sd": [float(v) for v in arr.std(axis=0)] if len(arr) else None,
+        "r_hat_max": None,
+        "ess_bulk_min": None,
+    }
+    return x0, arr[:, :alpha_dim], arr[:, alpha_dim:], diagnostics
+
+
 def _finite_or_none(value: Any) -> float | None:
     try:
         v = float(value)
@@ -326,5 +434,6 @@ __all__ = [
     "CalibrationResult",
     "calibrate",
     "model_observable",
+    "negative_binomial_noise",
     "r2_score_np",
 ]

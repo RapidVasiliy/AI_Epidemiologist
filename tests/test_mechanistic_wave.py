@@ -124,3 +124,28 @@ def test_small_absolute_gaps_are_not_disagreement():
     strict = MechanisticWaveConfig(agreement_gap_floor_per_10k=0.0)
     _, cmp_strict, _ = compare_with_ml(1.0, best, None, None, dates, 1, ml, strict)
     assert "scale" in cmp_strict["disagreement_reasons"]
+
+
+def test_bootstrap_band_and_reproduction_number(synthetic_weekly):
+    weekly = synthetic_weekly()
+    noisy = weekly.copy()
+    rng = np.random.default_rng(0)
+    noisy["total_cases_formula"] = np.maximum(noisy["total_cases_formula"] * rng.normal(1, 0.1, len(noisy)), 0).round()
+    noisy["inc_per_10k"] = noisy["total_cases_formula"] / noisy["total_population"] * 10_000
+    origin = noisy["datetime"].iloc[14]
+    cfg = MechanisticWaveConfig(method="bootstrap", bootstrap_replicates=15, random_seed=0)
+    res = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=cfg)
+    assert res.status == "ok"
+    block = res.context_block
+    assert block["band_type"] == "predictive" and block["n_trajectories"] == 15
+    rt = block["reproduction_number"]
+    assert rt["current"] > 0 and rt["max"] >= rt["current"]
+    assert rt["current_q05"] is not None and rt["current_q05"] <= rt["current_q95"]
+    traj = res.trajectories
+    assert {"r_t", "r_t_q05", "r_t_q95", "q05", "q95"} <= set(traj.columns)
+    assert (traj["q95"] >= traj["q05"]).all()
+    param = run_mechanistic_wave_analysis(
+        noisy, origin_date=origin, config=cfg.model_copy(update={"bootstrap_band": "parameter"})
+    )
+    width = lambda t: float((t["q95"] - t["q05"]).mean())  # noqa: E731
+    assert width(param.trajectories) < width(traj)  # шум наблюдений расширяет полосу

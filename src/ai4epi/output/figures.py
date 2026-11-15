@@ -165,7 +165,8 @@ def build_publication_figure_assets(
             description=(
                 "Наблюдаемая заболеваемость гриппом на 10 тыс. населения, центральная траектория модели "
                 "Барояна–Рвачёва и 5–95% диапазон пучка траекторий; точки с интервалами — прогноз модели "
-                "машинного обучения на четыре недели."
+                "машинного обучения на четыре недели. Нижняя панель — эффективное репродуктивное число R_t "
+                "по модели (пунктир — уровень 1)."
             ),
             section_id="mechanistic_wave",
             order=45,
@@ -274,9 +275,17 @@ def _plot_mechanistic_wave(
     block = ctx.get("mechanistic_wave") or {}
 
     plt = _prepare_matplotlib()
-    fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
+    has_rt = "r_t" in table.columns and table["r_t"].notna().any()
+    if has_rt:
+        fig, (ax, ax_rt) = plt.subplots(2, 1, figsize=(14, 6.0), sharex=True, gridspec_kw={"height_ratios": [3, 1.2]})
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
+    band_label = {
+        "predictive": "Модель БР: 5–95% (бутстреп, с шумом наблюдений)",
+        "parameter": "Модель БР: 5–95% (бутстреп параметров)",
+    }.get(str(block.get("band_type")), "Модель БР: 5–95% пучка")
     if {"q05", "q95"}.issubset(table.columns):
-        ax.fill_between(x, table["q05"], table["q95"], color="#9467bd", alpha=PI_ALPHA, label="Модель БР: 5–95% пучка")
+        ax.fill_between(x, table["q05"], table["q95"], color="#9467bd", alpha=PI_ALPHA, label=band_label)
     ax.plot(x, table["best"], color="#9467bd", linewidth=2, label="Модель БР: центральная траектория")
     ax.plot(x[:n_obs], table["observed"].iloc[:n_obs], color=DATA_COLOR, marker="o", linewidth=0, markersize=5, label="Наблюдения")
 
@@ -309,9 +318,19 @@ def _plot_mechanistic_wave(
                 (px, float(table["best"].iloc[px])),
                 textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, color="#9467bd",
             )
-    ax.set_xticks(x[::tick_step])
-    ax.set_xticklabels(labels[::tick_step])
-    ax.set_xlabel("ISO-неделя")
+    bottom = ax
+    if has_rt:
+        bottom = ax_rt
+        if {"r_t_q05", "r_t_q95"}.issubset(table.columns):
+            ax_rt.fill_between(x, table["r_t_q05"], table["r_t_q95"], color="#9467bd", alpha=PI_ALPHA)
+        ax_rt.plot(x, table["r_t"], color="#9467bd", linewidth=1.8)
+        ax_rt.axhline(1.0, color="grey", linestyle="--", linewidth=1)
+        ax_rt.axvline(n_obs - 1, color="grey", linestyle=":", linewidth=1)
+        ax_rt.set_ylabel("R_t модели")
+        ax_rt.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+    bottom.set_xticks(x[::tick_step])
+    bottom.set_xticklabels(labels[::tick_step])
+    bottom.set_xlabel("ISO-неделя")
     ax.set_ylabel("на 10 тыс. населения")
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
     ax.legend(fontsize=9, loc="upper left")

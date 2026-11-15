@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from ai4epi.data.age_pcr import DEFAULT_AGE_PCR_PATH, attach_age_pcr, load_age_pcr
 from ai4epi.data.influenza import (
     INFLUENZA_CASES_SCHEMA,
     STRAIN_NAMES,
@@ -38,6 +39,11 @@ LOCAL_CITY_NAMES_RU: dict[str, str] = {
     "spb": "Санкт-Петербург",
     "samara": "Самара",
     "chelyabinsk": "Челябинск",
+    "moscow": "Москва",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "voronezh": "Воронеж",
+    "krasnodar": "Краснодар",
 }
 
 # Excel-заголовок -> имя столбца контракта ``cases``.
@@ -116,6 +122,7 @@ def load_local_cases(
     data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR,
     pcr_gap_policy: PcrGapPolicy = "interpolate",
     end_date: date | datetime | str | None = None,
+    age_pcr_path: str | Path | Literal["auto"] | None = "auto",
 ) -> tuple[pd.DataFrame, int]:
     """Прочитать cases.xlsx + pcr.xlsx и привести к контракту ``cases``.
 
@@ -130,6 +137,9 @@ def load_local_cases(
       на такой неделе равна нулю.
 
     В обоих режимах отбрасываются последние недели без ПЦР (неполная выгрузка).
+    Если для города есть ПЦР по возрастам (``age_pcr_path``, см. ``ai4epi.data.age_pcr``),
+    к таблице добавляются столбцы ``age_pcr_tested_k`` / ``age_pcr_positive_k``; ``"auto"`` —
+    файл ``<data_dir>/../national/<имя DEFAULT_AGE_PCR_PATH>``, ``None`` — не добавлять.
     ``end_date`` обрезает ряд *до* обработки пропусков: интерполяция не
     использует данные ПЦР недель после ``end_date`` (состояние «как было
     известно на дату», без заглядывания вперёд).
@@ -190,6 +200,10 @@ def load_local_cases(
         ).round()
     merged = merged.drop(columns=["tested_total", *[f"tested_strain_{i}" for i in STRAIN_NAMES]])
     merged = merged.reset_index(drop=True)
+    if age_pcr_path == "auto":
+        age_pcr_path = Path(data_dir).parent / "national" / DEFAULT_AGE_PCR_PATH.name
+    if age_pcr_path is not None:
+        merged = attach_age_pcr(merged, load_age_pcr(city, path=age_pcr_path))
     INFLUENZA_CASES_SCHEMA.validate_dataframe(merged, name="influenza_cases")
     return merged, dropped
 

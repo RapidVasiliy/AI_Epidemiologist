@@ -150,3 +150,61 @@ def test_unknown_calibration_method():
 
     with pytest.raises(CalibrationError):
         calibrate(get_model("total"), np.ones(5), ModelParams([0], [0], 1000, [1.0]), method="grid")  # type: ignore[arg-type]
+
+
+def test_age_model_with_external_contact_matrix():
+    from ai4epi.mechanistic import RSCF_CONTACT_MATRIX_2
+    from ai4epi.mechanistic.models import normalized_contact_matrix
+
+    matrix_model = get_model("age", contact_matrix=RSCF_CONTACT_MATRIX_2)
+    assert matrix_model.params_dims() == (2, 1)
+    m = normalized_contact_matrix(RSCF_CONTACT_MATRIX_2)
+    assert np.max(np.abs(np.linalg.eigvals(m))) == pytest.approx(1.0)
+    params = _age_params([0.4, 0.3], [1.5])
+    free = get_model("age")
+    expected = free.simulate(params.with_values([0.4, 0.3], (1.5 * m).reshape(-1)), 70).newly_infected
+    np.testing.assert_allclose(matrix_model.simulate(params, 70).newly_infected, expected)
+    with pytest.raises(ValueError):
+        get_model("age", contact_matrix=[[1.0, 2.0, 3.0]])
+
+
+def test_reproduction_number_total_and_age():
+    model = get_model("total")
+    params = ModelParams([0.5], [0.8], 100_000, [10.0])
+    sim = model.simulate(params, 140)
+    r = model.reproduction_number(params, sim)
+    g_sum = float(np.sum(DEFAULT_INFECTIVITY_PROFILE))
+    assert r[0] == pytest.approx(0.8 * int(0.5 * 100_000) / 100_000 * g_sum)
+    assert np.all(np.diff(r) <= 1e-12)  # запас восприимчивых только убывает
+    assert r[-1] < 1.0 < r[0]
+    age = get_model("age")
+    p = _age_params([0.5, 0.5], [0.8] * 4)
+    r_age = age.reproduction_number(p, age.simulate(p, 70))
+    assert r_age[0] > 1.0 and r_age.shape == (70,)
+
+
+def test_negative_binomial_noise_moments():
+    from ai4epi.mechanistic import negative_binomial_noise
+
+    rng = np.random.default_rng(0)
+    mean = np.full(20_000, 50.0)
+    x = negative_binomial_noise(mean, 400.0, rng)
+    assert x.mean() == pytest.approx(50.0, rel=0.05)
+    assert x.var() == pytest.approx(400.0, rel=0.1)
+    y = negative_binomial_noise(np.array([0.0, 10.0]), 1.0, rng)  # дисперсия < среднего -> Пуассон
+    assert y[0] == 0 and y[1] >= 0
+
+
+def test_bootstrap_calibration_returns_bundle():
+    model = get_model("total")
+    template = ModelParams([0.0], [0.0], 500_000, [100.0])
+    truth = template.with_values([0.55], [0.7])
+    clean = model_observable(model, truth, 18)
+    rng = np.random.default_rng(3)
+    observed = np.maximum(clean + rng.normal(0, 0.05 * clean.max(), clean.shape), 0)
+    result = calibrate(model, observed, template, method="bootstrap", observation_scale=1e4 / 5e6, n_samples=20, random_seed=1)
+    assert result.has_bundle and len(result.alpha_samples) == 20
+    assert r2_score_np(observed, model_observable(model, result.best_params, 18)) > 0.9
+    d = result.diagnostics
+    assert d["residual_variance"][0] > 0 and d["failed_refits"] == 0
+    assert d["parameter_sd"][0] > 0  # разброс параметров по репликам

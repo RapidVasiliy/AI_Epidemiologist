@@ -218,6 +218,9 @@ def _origin_task_impl(
                         "br_fit_r2": block["fit_r2_in_sample"],
                         "br_rhat": block["diagnostics"]["r_hat_max"],
                         "br_values": [h["br_value"] for h in block["horizons"]],
+                        "br_lows": [h["br_low"] for h in block["horizons"]],
+                        "br_highs": [h["br_high"] for h in block["horizons"]],
+                        "br_r_t": block.get("reproduction_number", {}).get("current"),
                     }
                 )
         except Exception as exc:  # калибровка не должна останавливать бэктест
@@ -242,6 +245,9 @@ def _origin_task_impl(
             "br_fit_r2": br.get("br_fit_r2"),
             "br_rhat": br.get("br_rhat"),
             "br": br["br_values"][h - 1] if "br_values" in br else np.nan,
+            "br_lo": _num(br["br_lows"][h - 1]) if "br_lows" in br else np.nan,
+            "br_hi": _num(br["br_highs"][h - 1]) if "br_highs" in br else np.nan,
+            "br_r_t": _num(br.get("br_r_t")),
         }
         for name, values in preds.items():
             row[f"ml_{name}"] = float(values[h - 1])
@@ -305,6 +311,10 @@ def _metrics(y: np.ndarray, p: np.ndarray) -> JsonObject:
     }
 
 
+def _num(value: Any) -> float:
+    return float(value) if value is not None else np.nan
+
+
 def evaluate_backtest(pred: pd.DataFrame, cfg: BacktestConfig, *, label: str = "") -> JsonObject:
     model_cols = [c for c in pred.columns if c.startswith("ml_") and not c.startswith(("ml_lo", "ml_hi"))]
     primary = f"ml_{cfg.primary_variant}"
@@ -337,6 +347,20 @@ def evaluate_backtest(pred: pd.DataFrame, cfg: BacktestConfig, *, label: str = "
             "coverage_off_wave": round(float(inside[~in_wave].mean()), 3) if (~in_wave).any() else None,
             "width_wave": round(float(width[in_wave].mean()), 3) if in_wave.any() else None,
             "width_off_wave": round(float(width[~in_wave].mean()), 3) if (~in_wave).any() else None,
+            "by_horizon": {int(h): round(float(g.mean()), 3) for h, g in inside.groupby(iv["horizon"])},
+        }
+    # полоса модели БР (q05–q95 пучка): покрытие на точках, где БР откалибрована
+    if "br_lo" in scored and scored["br_lo"].notna().any():
+        iv = scored[scored["br_lo"].notna() & scored["br"].notna()]
+        inside = (iv["y_true"] >= iv["br_lo"]) & (iv["y_true"] <= iv["br_hi"])
+        width = iv["br_hi"] - iv["br_lo"]
+        in_wave = iv["phase"].isin(wave_phases)
+        intervals["br_band"] = {
+            "n": len(iv),
+            "nominal_coverage": 0.9,
+            "coverage": round(float(inside.mean()), 3),
+            "mean_width": round(float(width.mean()), 3),
+            "coverage_wave": round(float(inside[in_wave].mean()), 3) if in_wave.any() else None,
             "by_horizon": {int(h): round(float(g.mean()), 3) for h, g in inside.groupby(iv["horizon"])},
         }
     # обратная совместимость: верхний уровень — абсолютные интервалы
@@ -416,6 +440,11 @@ def render_backtest_report(metrics: JsonObject) -> str:
                 f"| {label_ru} | {k['n']} | {k['coverage']} | {fmt(k['coverage_wave'])} | {fmt(k['coverage_off_wave'])} | "
                 f"{fmt(k['width_wave'])} | {fmt(k['width_off_wave'])} |"
             )
+    if iv.get("br_band"):
+        k = iv["br_band"]
+        lines += ["", f"Полоса модели БР (q05–q95, номинально 0.9): n = {k['n']}, покрытие {k['coverage']} "
+                  f"(на волне {fmt(k['coverage_wave'])}), средняя ширина {k['mean_width']}; по горизонтам: "
+                  + ", ".join(f"h{h}: {v}" for h, v in k["by_horizon"].items()) + "."]
     lines.append("")
     lines += ["## По фазам волны (MAE)", "", "| Фаза | недель | ML | наивный | БР |", "|---|---|---|---|---|"]
     primary = f"ml_{metrics['primary_variant']}"

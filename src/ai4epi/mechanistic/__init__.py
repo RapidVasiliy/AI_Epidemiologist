@@ -10,10 +10,12 @@ from ai4epi.mechanistic.calibration import (
     CalibrationResult,
     calibrate,
     model_observable,
+    negative_binomial_noise,
     r2_score_np,
 )
 from ai4epi.mechanistic.models import (
     DEFAULT_INFECTIVITY_PROFILE,
+    RSCF_CONTACT_MATRIX_2,
     AgeGroupBRModel,
     BaroyanRvachevModel,
     ModelParams,
@@ -25,6 +27,7 @@ from ai4epi.mechanistic.models import (
 __all__ = [
     "CALIBRATION_METHODS",
     "DEFAULT_INFECTIVITY_PROFILE",
+    "RSCF_CONTACT_MATRIX_2",
     "AgeGroupBRModel",
     "BaroyanRvachevModel",
     "CalibrationError",
@@ -35,5 +38,6 @@ __all__ = [
     "calibrate",
     "get_model",
     "model_observable",
+    "negative_binomial_noise",
     "r2_score_np",
 ]
