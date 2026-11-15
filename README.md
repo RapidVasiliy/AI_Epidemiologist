@@ -33,7 +33,9 @@ The system is designed for researchers and developers who need more than point f
 - [Adding a new report section](#adding-a-new-report-section)
 - [Evaluation layer](#evaluation-layer)
 - [Research methodology](#research-methodology)
+- [Mechanistic wave model (Baroyan–Rvachev)](#mechanistic-wave-model-baroyanrvachev)
 - [Limitations](#limitations)
+- [Tests](#tests)
 - [Development](#development)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap](#roadmap)
@@ -151,6 +153,10 @@ The main engineering principle is separation of responsibilities:
 .
 ├── pyproject.toml
 ├── README.md
+├── data/regions/          # local xlsx surveillance data (spb, samara, chelyabinsk)
+├── docs/
+│   └── mechanistic_wave.md
+├── tests/
 ├── runs/
 │   ├── latest_narrators/
 │   ├── latest_no_eval_pdf/
@@ -164,6 +170,7 @@ The main engineering principle is separation of responsibilities:
         │   ├── epidemic_waves.py
         │   ├── explainability.py
         │   ├── forecasting.py
+        │   ├── mechanistic_wave.py   # Baroyan–Rvachev stage
         │   └── preprocessing.py
         ├── core/
         │   ├── config.py
@@ -172,12 +179,16 @@ The main engineering principle is separation of responsibilities:
         │   └── sections.py
         ├── data/
         │   ├── influenza.py
+        │   ├── local_excel.py
         │   └── weather.py
         ├── generation/
         │   ├── bulletin.py
         │   ├── editor.py
         │   ├── narrator.py
         │   └── pipeline.py
+        ├── mechanistic/            # Baroyan–Rvachev model and calibration
+        │   ├── calibration.py
+        │   └── models.py
         ├── orchestration/
         │   └── workflow.py
         ├── output/
@@ -191,7 +202,7 @@ The main engineering principle is separation of responsibilities:
         └── cli.py
 ```
 
-The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format.
+The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format. (`runs/` is not included in this copy of the repository.)
 
 ---
 
@@ -225,6 +236,14 @@ python -m pip install -e .
 python -m pip install -e ".[dev,test,notebook]"
 ```
 
+### Mechanistic wave model dependencies
+
+The Baroyan–Rvachev stage (`--mechanistic-wave`) needs PyMC 5.x (PyMC 6 changed the sampling API):
+
+```bash
+python -m pip install -e ".[mechanistic]"
+```
+
 ### Check the CLI
 
 ```bash
@@ -237,7 +256,9 @@ Expected top-level commands:
 init-config
 run-analysis-source
 run-analysis-tables
+run-analysis-local
 run-all
+run-all-local
 generate-bulletin
 evaluate-bulletin
 render
@@ -345,6 +366,22 @@ runs/spb_latest/
 ```
 
 If `--end-date` is omitted, the workflow uses the latest available surveillance week after data loading and writes the resolved date to `workflow_run.json` as `effective_end_date`.
+
+---
+
+### Offline run from local xlsx data
+
+`data/regions/<city>/{cases,pcr}.xlsx` (Saint Petersburg, Samara, Chelyabinsk, 2010 – Oct/Nov 2024) can be used without network access. Without a weather table the forecasting model is built without weather features.
+
+```bash
+ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --output-dir runs/spb_2019w04/analysis
+```
+
+```bash
+ai4epi run-all-local --city spb --end-date 2019-01-21 --mechanistic-wave --model qwen3:8b --output-dir runs/spb_2019w04
+```
+
+`--end-date` reproduces the state of the system at a past week. See [docs/mechanistic_wave.md](docs/mechanistic_wave.md).
 
 ---
 
@@ -541,7 +578,7 @@ ai4epi run-analysis-source \
 
 ## Generated report structure
 
-The default report registry contains seven sections:
+The default report registry contains eight sections (two of them optional):
 
 | Section ID | Title | Purpose |
 |---|---|---|
@@ -549,6 +586,7 @@ The default report registry contains seven sections:
 | `epidemic_wave_comparison` | Epidemic-wave comparison | Comparison of recent epidemic waves by peak height, peak timing, width, and seasonal burden. |
 | `age_group_season_overview` | Age-group structure | Current-season age-group peak and burden analysis. |
 | `forecast_risks` | Forecast and risk assessment | Point forecast, uncertainty intervals, and risk interpretation. |
+| `mechanistic_wave` | Epidemic-wave phase (Baroyan–Rvachev) | Optional. Wave phase, expected peak and end of the main wave from the mechanistic model, and agreement with the ML forecast. Present only when the analysis ran with `--mechanistic-wave` and an epidemic rise was detected. |
 | `shap_interpretation` | Model interpretation | SHAP-based explanation of forecast drivers. |
 | `model_quality` | Model quality and limitations | Forecast metrics, error patterns, and practical constraints. |
 | `model_description` | Model description | Compact model card for the report. |
@@ -920,6 +958,33 @@ Quality control combines:
 
 ---
 
+## Mechanistic wave model (Baroyan–Rvachev)
+
+The optional stage `ai4epi.analysis.mechanistic_wave` implements the complementary scheme of Lazutov et al.: the ML model (HGB) gives the 1–4-week values, the discrete Baroyan–Rvachev model, recalibrated on the current wave, gives the phase of the wave, the expected peak and the end of the main wave; when the two disagree, the report states increased uncertainty instead of averaging.
+
+The model and calibration code (`ai4epi.mechanistic`) were ported from the `Influenza_bulletin` repository (`model_complex`). Methods: `mcmc` (ABC kernel + DEMetropolisZ, default), `abc` (SMC), `optuna`, `annealing`.
+
+```python
+from ai4epi.analysis.analysis_pipeline import AnalysisPipelineSettings, run_analysis_pipeline
+from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
+from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
+from ai4epi.data.local_excel import load_local_influenza
+
+bundle = load_local_influenza("spb", end_date="2019-01-21")
+result = run_analysis_pipeline(
+    influenza_weekly=bundle.weekly,
+    age_group_frame=bundle.cases,
+    settings=AnalysisPipelineSettings(require_weather=False, run_mechanistic_wave=True),
+    feature_config=FeatureEngineeringConfig(temp_cols=()),
+    mechanistic_wave_config=MechanisticWaveConfig(method="mcmc"),
+)
+result.context.get_block("mechanistic_wave")["comparison_with_ml"]
+```
+
+Details, defaults and differences from the original code: [docs/mechanistic_wave.md](docs/mechanistic_wave.md).
+
+---
+
 ## Limitations
 
 AI4Epi is **alpha research software**, not a production public-health decision system.
@@ -946,6 +1011,16 @@ Important limitations:
 
 7. **Broader validation is ongoing.**  
    Current artifacts focus on the influenza/ARI surveillance scenario. Wider validation across cities, seasons, pathogens, and reporting regimes is part of the research roadmap.
+
+---
+
+## Tests
+
+```bash
+python -m pip install -e ".[dev,mechanistic]"
+python -m pytest                  # all tests, ~1 min
+python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~10 s
+```
 
 ---
 

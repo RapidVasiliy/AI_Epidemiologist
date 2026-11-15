@@ -493,6 +493,29 @@ MODEL_DESCRIPTION_PROMPT = (
 )
 
 
+MECHANISTIC_WAVE_PROMPT = (
+    "Ты Narrator — автор раздела 'Фаза эпидемической волны' в бюллетене по гриппу. "
+    "Раздел опирается на механистическую модель Барояна–Рвачёва, откалиброванную по данным "
+    "текущей волны, и на её сопоставление с прогнозом модели машинного обучения. "
+    "Верни JSON: {phase_text, comparison_text}. "
+    "АБЗАЦ 1 (phase_text): назови фазу волны по phase_label; укажи ожидаемую неделю и величину "
+    "максимума по центральной траектории (peak.date, peak.iso_week, peak.value) и диапазон по пучку "
+    "траекторий (peak.range), если он задан; если peak.already_passed=true, пиши, что максимум, по оценке "
+    "модели, уже пройден. Если wave_end.within_projection=true, укажи оценку недели завершения основной "
+    "волны и её определение (wave_end.definition); иначе напиши, что завершение за пределами горизонта "
+    "моделирования. Если early_phase_caution=true, явно укажи, что оценки на ранней фазе роста ориентировочные. "
+    "Упомяни R² на калибровочном участке только как характеристику описания наблюдаемой части волны. "
+    "АБЗАЦ 2 (comparison_text): сопоставь направление прогнозов двух моделей на горизонте четырёх недель "
+    "(comparison_with_ml.br_direction и ml_direction). Если agreement_code='agree', напиши, что прогнозы "
+    "согласуются: количественный прогноз на ближайшие недели даёт модель машинного обучения, а фазу и "
+    "максимум — механистическая модель. Если agreement_code='disagree', напиши, что прогнозы расходятся "
+    "(по направлению и/или масштабу — disagreement_reasons), что это признак повышенной неопределённости и "
+    "что прогнозы не усредняются. Если diagnostics.converged=false, добавь, что оценки параметров неустойчивы. "
+    "ПРАВИЛА: используй только данные из JSON; соблюдай forbidden_claims; недельная шкала времени; "
+    "не называй параметры alpha и beta, если об этом не просят данные; официальный нейтральный стиль, без списков."
+)
+
+
 def default_section_configs() -> list[SectionConfig]:
     """Вернуть дефолтные секции, перенесённые из notebook."""
 
@@ -581,6 +604,46 @@ def default_section_configs() -> list[SectionConfig]:
                 "relative_uncertainty_pct": "forecast.relative_uncertainty_pct",
                 "max_interval_width": "forecast.max_interval_width",
                 "semantic": "forecast.semantic",
+            },
+        ),
+        SectionConfig(
+            section_id="mechanistic_wave",
+            title="Фаза эпидемической волны (модель Барояна–Рвачёва)",
+            prompt=MECHANISTIC_WAVE_PROMPT,
+            output_schema=make_text_object_schema("phase_text", "comparison_text"),
+            evidence_key="mechanistic_wave_context",
+            order=45,
+            max_tokens=900,
+            activation_path="mechanistic_wave",
+            required=False,
+            context_mapping={
+                "unit": "unit",
+                "season_label": "mechanistic_wave.season_label",
+                "model_name_ru": "mechanistic_wave.model_name_ru",
+                "calibration_start_date": "mechanistic_wave.calibration_start_date",
+                "calibration_end_date": "mechanistic_wave.calibration_end_date",
+                "fit_r2_in_sample": "mechanistic_wave.fit_r2_in_sample",
+                "fit_r2_note": "mechanistic_wave.fit_r2_note",
+                "phase_label": "mechanistic_wave.phase_label",
+                "early_phase_caution": "mechanistic_wave.early_phase_caution",
+                "peak": "mechanistic_wave.peak",
+                "wave_end": "mechanistic_wave.wave_end",
+                "horizons": "mechanistic_wave.horizons",
+                "comparison_with_ml": "mechanistic_wave.comparison_with_ml",
+                "diagnostics": "mechanistic_wave.diagnostics",
+                "allowed_claims": "mechanistic_wave.allowed_claims",
+                "forbidden_claims": "mechanistic_wave.forbidden_claims",
+                "semantic": "mechanistic_wave.semantic",
+            },
+            metadata={
+                "expected_numbers": [
+                    {"label": "величина максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.value", "required": True},
+                    {"label": "неделя максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.iso_week", "required": False},
+                ],
+                "editor_field_roles": {
+                    "phase_text": "абзац о фазе эпидемической волны, сроке и величине максимума по механистической модели",
+                    "comparison_text": "абзац о согласии или расхождении прогнозов механистической модели и модели машинного обучения",
+                },
             },
         ),
         SectionConfig(

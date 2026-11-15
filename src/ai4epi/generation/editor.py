@@ -585,6 +585,8 @@ def editor_field_profile(section_id: str, field_path: TextPath) -> JsonObject:
         ("epidemic_wave_comparison", "comparison_text"),
         ("age_group_season_overview", "overview_text"),
         ("model_quality", "limitations_text"),
+        ("mechanistic_wave", "phase_text"),
+        ("mechanistic_wave", "comparison_text"),
     }
 
     if (section_id, field_name) in prose_heavy:

@@ -231,7 +231,7 @@ def prepare_seasonal_weekly_frame(frame: pd.DataFrame, *, config: EpidemicWaveCo
         duplicates = data.loc[data[cfg.datetime_col].duplicated(keep=False), cfg.datetime_col].head(10).tolist()
         raise EpidemicWaveInputError(f"Duplicate weekly dates are not allowed: {duplicates!r}.")
     if cfg.require_monday_week_start:
-        non_monday = data.loc[data[cfg.datetime_col].dt.dayofweek != 0, cfg.datetime_col].head(10).tolist()
+        non_monday = data.loc[data[cfg.datetime_col].dt.day_of_week != 0, cfg.datetime_col].head(10).tolist()
         if non_monday:
             raise EpidemicWaveInputError(f"Expected Monday week starts. Examples: {non_monday!r}.")
     if cfg.require_regular_weekly_index and len(data) > 1:

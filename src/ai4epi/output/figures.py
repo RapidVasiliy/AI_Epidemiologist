@@ -10,7 +10,9 @@ The plotting code intentionally follows the reference notebook output:
 1. forecast plot with two panels: RU and EN;
 2. three-wave comparison plot with peak labels and FWHM markers;
 3. age-group season overlay plot;
-4. age-group panel plot with raw/smoothed curves and width markers.
+4. age-group panel plot with raw/smoothed curves and width markers;
+5. mechanistic (Baroyan–Rvachev) wave plot with the ML forecast overlay, when
+   the ``mechanistic_wave`` block is present.
 
 The renderer/PDF layer decides where these assets are placed in the final
 bulletin. This module is responsible only for making the images themselves.
@@ -151,7 +153,95 @@ def build_publication_figure_assets(
             placement="before_section",
         )
 
+    mech_path = _artifact_path(artifacts, "mechanistic_wave.trajectories_csv")
+    mech_plot_path = out / "mechanistic_wave_plot.png"
+    if mech_path and ctx.get("mechanistic_wave") and _plot_mechanistic_wave(ctx, mech_path, mech_plot_path, dpi=dpi):
+        assets["mechanistic_wave_plot"] = _image_asset(
+            name="mechanistic_wave_plot",
+            path=mech_plot_path,
+            title="Рис. 5. Текущая эпидемическая волна по модели Барояна–Рвачёва и прогноз модели машинного обучения.",
+            description=(
+                "Наблюдаемая заболеваемость гриппом на 10 тыс. населения, центральная траектория модели "
+                "Барояна–Рвачёва и 5–95% диапазон пучка траекторий; точки с интервалами — прогноз модели "
+                "машинного обучения на четыре недели."
+            ),
+            section_id="mechanistic_wave",
+            order=45,
+            placement="before_section",
+        )
+
     return assets
+
+
+def _plot_mechanistic_wave(
+    ctx: Mapping[str, Any],
+    trajectories_path: Path,
+    path: Path,
+    *,
+    dpi: int,
+    weeks_after_origin: int = 12,
+    tick_step: int = 2,
+) -> bool:
+    table = pd.read_csv(trajectories_path)
+    if not {"datetime", "best", "observed", "is_projection"}.issubset(table.columns):
+        return False
+    table["datetime"] = pd.to_datetime(table["datetime"])
+    is_proj = table["is_projection"].astype(str).str.lower().isin({"true", "1"})
+    n_obs = int((~is_proj).sum())
+    if n_obs == 0:
+        return False
+    table = table.iloc[: n_obs + weeks_after_origin].reset_index(drop=True)
+    x = np.arange(len(table))
+    labels = _iso_week_labels(pd.DatetimeIndex(table["datetime"]))
+    block = ctx.get("mechanistic_wave") or {}
+
+    plt = _prepare_matplotlib()
+    fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
+    if {"q05", "q95"}.issubset(table.columns):
+        ax.fill_between(x, table["q05"], table["q95"], color="#9467bd", alpha=PI_ALPHA, label="Модель БР: 5–95% пучка")
+    ax.plot(x, table["best"], color="#9467bd", linewidth=2, label="Модель БР: центральная траектория")
+    ax.plot(x[:n_obs], table["observed"].iloc[:n_obs], color=DATA_COLOR, marker="o", linewidth=0, markersize=5, label="Наблюдения")
+
+    horizons = list((ctx.get("forecast") or {}).get("horizons") or [])
+    if horizons:
+        dates = list(pd.to_datetime(table["datetime"]))
+        xs, ys, lo, hi = [], [], [], []
+        for row in horizons:
+            target = pd.Timestamp(row.get("target_date"))
+            if target in dates:
+                xs.append(dates.index(target))
+                ys.append(float(row.get("point_forecast")))
+                lo.append(float(row.get("q_lo")))
+                hi.append(float(row.get("q_hi")))
+        if xs:
+            ys_arr = np.asarray(ys)
+            ax.errorbar(
+                xs, ys_arr, yerr=[ys_arr - np.asarray(lo), np.asarray(hi) - ys_arr],
+                color=FORECAST_COLOR, marker="s", linestyle="--", capsize=3, label="Модель МО: прогноз и интервал",
+            )
+
+    ax.axvline(n_obs - 1, color="grey", linestyle=":", linewidth=1)
+    peak = block.get("peak") or {}
+    if peak.get("date"):
+        peak_dt = pd.Timestamp(peak["date"])
+        if peak_dt in set(table["datetime"]):
+            px = int(table.index[table["datetime"] == peak_dt][0])
+            ax.annotate(
+                f"max {float(peak.get('value', 0.0)):.1f}",
+                (px, float(table["best"].iloc[px])),
+                textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, color="#9467bd",
+            )
+    ax.set_xticks(x[::tick_step])
+    ax.set_xticklabels(labels[::tick_step])
+    ax.set_xlabel("ISO-неделя")
+    ax.set_ylabel("на 10 тыс. населения")
+    ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+    ax.legend(fontsize=9, loc="upper left")
+    phase = block.get("phase_label")
+    if phase:
+        ax.set_title(f"Сезон {block.get('season_label', '')}: {phase}", fontsize=11)
+    _save_figure(fig, path, dpi=dpi)
+    return True
 
 
 def _context_payload(context: GlobalContext | Mapping[str, Any]) -> JsonObject:

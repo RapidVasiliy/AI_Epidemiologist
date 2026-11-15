@@ -5,7 +5,9 @@ CLI является тонким orchestration-слоем поверх уже �
 не содержит доменной логики, не меняет параметры моделей неявно и не дублирует
 пайплайны. Каждая команда вызывает публичные функции соответствующего слоя:
 
-* analysis_pipeline.py — численный pipeline до GlobalContext;
+* analysis_pipeline.py — численный pipeline до GlobalContext
+  (включая модель Барояна–Рвачёва, флаг ``--mechanistic-wave``);
+* local_excel.py — локальные xlsx по городам (``run-analysis-local``, ``run-all-local``);
 * config.py / pipeline.py — LLM/bulletin pipeline;
 * evaluation.py — downstream evaluation;
 * rendering.py — Markdown/HTML rendering;
@@ -48,7 +50,11 @@ try:  # Пакетный импорт.
         FullWorkflowSettings,
         WorkflowLLMConfig,
         run_full_workflow_from_sources,
+        run_full_workflow_from_tables,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza
 except ImportError:  # pragma: no cover - поддержка запуска из плоского исследовательского каталога.
     from ai4epi.analysis.analysis_pipeline import (  # type: ignore[no-redef]
         AnalysisOutputConfig,
@@ -74,7 +80,11 @@ except ImportError:  # pragma: no cover - поддержка запуска из
         FullWorkflowSettings,
         WorkflowLLMConfig,
         run_full_workflow_from_sources,
+        run_full_workflow_from_tables,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig  # type: ignore[no-redef]
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig  # type: ignore[no-redef]
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza  # type: ignore[no-redef]
 
 
 JsonObject = dict[str, Any]
@@ -125,7 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_init_config_command(subparsers)
     _add_run_analysis_source_command(subparsers)
     _add_run_analysis_tables_command(subparsers)
+    _add_run_analysis_local_command(subparsers)
     _add_run_all_command(subparsers)
+    _add_run_all_local_command(subparsers)
     _add_generate_bulletin_command(subparsers)
     _add_evaluate_bulletin_command(subparsers)
     _add_render_command(subparsers)
@@ -173,6 +185,7 @@ def _add_run_analysis_source_command(subparsers: argparse._SubParsersAction[argp
     parser.add_argument("--no-age-group", action="store_true", help="Пропустить возрастной сезонный анализ.")
     parser.add_argument("--require-age-group", action="store_true", help="Считать отсутствие возрастного блока ошибкой.")
     parser.add_argument("--raise-on-error", action="store_true", help="Пробрасывать ошибку из analysis pipeline.")
+    _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_analysis_source)
 
 
@@ -193,6 +206,7 @@ def _add_run_analysis_tables_command(subparsers: argparse._SubParsersAction[argp
     parser.add_argument("--no-age-group", action="store_true", help="Пропустить возрастной сезонный анализ.")
     parser.add_argument("--require-age-group", action="store_true", help="Считать отсутствие возрастного блока ошибкой.")
     parser.add_argument("--raise-on-error", action="store_true", help="Пробрасывать ошибку из analysis pipeline.")
+    _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_analysis_tables)
 
 
@@ -233,7 +247,87 @@ def _add_run_all_command(subparsers: argparse._SubParsersAction[argparse.Argumen
     parser.add_argument("--render-pdf", action="store_true", help="Дополнительно сформировать PDF.")
     parser.add_argument("--raise-on-error", action="store_true", help="Пробрасывать исключения из workflow.")
     parser.add_argument("--fail-on-evaluation-errors", action="store_true", help="Считать ошибки evaluation фатальными.")
+    _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_all)
+
+
+def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("модель Барояна–Рвачёва")
+    group.add_argument("--mechanistic-wave", action="store_true", help="Включить этап модели Барояна–Рвачёва (фаза волны, пик, сопоставление с ML).")
+    group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
+    group.add_argument("--br-epsilon", type=float, default=1.0, help="Масштаб ABC-ядра (в случаях на 10 тыс.). По умолчанию: %(default)s.")
+    group.add_argument("--br-calibration-start", choices=("wave_onset", "season_start"), default="wave_onset", help="Начало калибровки: от начала роста или с недели --br-season-start-week.")
+    group.add_argument("--br-calibration-start-date", default=None, help="Явная дата начала калибровки (YYYY-MM-DD).")
+    group.add_argument("--br-season-start-week", type=int, default=35, help="ISO-неделя начала сезона. По умолчанию: %(default)s.")
+    group.add_argument("--br-tune", type=int, default=2500, help="MCMC: число настроечных итераций.")
+    group.add_argument("--br-draws", type=int, default=500, help="MCMC/SMC: число сохраняемых итераций.")
+    group.add_argument("--br-chains", type=int, default=4, help="MCMC/SMC: число цепей.")
+    group.add_argument("--br-seed", type=int, default=42, help="Random seed калибровки.")
+
+
+def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
+    return MechanisticWaveConfig(
+        method=args.br_method,
+        epsilon=args.br_epsilon,
+        calibration_start=args.br_calibration_start,
+        calibration_start_date=args.br_calibration_start_date,
+        season_start_week=args.br_season_start_week,
+        tune=args.br_tune,
+        draws=args.br_draws,
+        chains=args.br_chains,
+        random_seed=args.br_seed,
+    )
+
+
+def _add_local_source_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--city", required=True, help="Каталог города в --data-dir: spb, samara, chelyabinsk.")
+    parser.add_argument("--data-dir", default=DEFAULT_LOCAL_DATA_DIR, type=Path, help="Каталог с <city>/cases.xlsx и pcr.xlsx. По умолчанию: %(default)s.")
+    parser.add_argument("--start-date", default=None, help="Первая неделя ряда (YYYY-MM-DD).")
+    parser.add_argument("--end-date", default=None, help="Последняя неделя ряда (YYYY-MM-DD): состояние системы на эту неделю.")
+    parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР: интерполяция доли положительных или ноль (как в Influenza_bulletin).")
+    parser.add_argument("--weather-weekly", default=None, type=Path, help="Необязательная weekly weather-таблица; без неё модель строится без погодных признаков.")
+
+
+def _add_run_analysis_local_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "run-analysis-local",
+        help="Численный pipeline по локальным xlsx (data/regions/<city>), без обращения к сети.",
+    )
+    _add_local_source_args(parser)
+    parser.add_argument("--output-dir", default="analysis_outputs", type=Path, help="Каталог численных артефактов.")
+    parser.add_argument("--no-context", action="store_true", help="Не собирать GlobalContext после численных этапов.")
+    parser.add_argument("--no-explainability", action="store_true", help="Пропустить SHAP-анализ.")
+    parser.add_argument("--no-epidemic-waves", action="store_true", help="Пропустить анализ эпидемических волн.")
+    parser.add_argument("--no-age-group", action="store_true", help="Пропустить возрастной сезонный анализ.")
+    parser.add_argument("--raise-on-error", action="store_true", help="Пробрасывать ошибку из analysis pipeline.")
+    _add_mechanistic_args(parser)
+    parser.set_defaults(handler=_cmd_run_analysis_local)
+
+
+def _add_run_all_local_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "run-all-local",
+        help="Полный workflow по локальным xlsx: анализ → бюллетень → editor/evaluation/rendering.",
+    )
+    _add_local_source_args(parser)
+    parser.add_argument("--model", required=True, help="Имя LLM-модели, например qwen3.5:9b.")
+    parser.add_argument(
+        "--evaluator-model",
+        default=os.getenv("EVAL_OLLAMA_MODEL", DEFAULT_EVALUATOR_MODEL),
+        help="Отдельная LLM-модель для evaluation-layer. По умолчанию: %(default)s.",
+    )
+    parser.add_argument("--backend", default=os.getenv("EVAL_LLM_BACKEND", DEFAULT_EVALUATOR_BACKEND), help="LLM backend. Сейчас поддерживается ollama.")
+    parser.add_argument("--base-url", default="http://localhost:11434", help="Base URL LLM backend.")
+    parser.add_argument("--timeout-sec", type=int, default=180, help="HTTP timeout для LLM backend.")
+    parser.add_argument("--output-dir", default="runs/ai4epi_local", type=Path, help="Корневой каталог полного запуска.")
+    parser.add_argument("--no-editor", action="store_true", help="Не запускать editor-pass.")
+    parser.add_argument("--no-evaluation", action="store_true", help="Не запускать downstream evaluation.")
+    parser.add_argument("--render-pdf", action="store_true", help="Дополнительно сформировать PDF.")
+    parser.add_argument("--raise-on-error", action="store_true", help="Пробрасывать исключения из workflow.")
+    parser.add_argument("--fail-on-evaluation-errors", action="store_true", help="Считать ошибки evaluation фатальными.")
+    _add_mechanistic_args(parser)
+    parser.set_defaults(handler=_cmd_run_all_local)
+
 
 def _add_generate_bulletin_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     parser = subparsers.add_parser(
@@ -340,6 +434,7 @@ def _cmd_run_analysis_source(args: argparse.Namespace) -> int:
         require_age_group_season=bool(args.require_age_group),
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
+        run_mechanistic_wave=bool(args.mechanistic_wave),
     )
     source = AnalysisSourceConfig(
         city=args.city,
@@ -355,6 +450,8 @@ def _cmd_run_analysis_source(args: argparse.Namespace) -> int:
         source=source,
         settings=settings,
         output=AnalysisOutputConfig(output_dir=args.output_dir),
+        feature_config=FeatureEngineeringConfig(temp_cols=()) if args.no_weather else None,
+        mechanistic_wave_config=_mechanistic_config(args),
     )
     _print_json(result.to_public_dict(include_heavy_objects=False))
     return EXIT_OK if result.status != "failed" else EXIT_FAILED
@@ -374,7 +471,9 @@ def _cmd_run_analysis_tables(args: argparse.Namespace) -> int:
         require_age_group_season=bool(args.require_age_group),
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
+        run_mechanistic_wave=bool(args.mechanistic_wave),
     )
+    no_weather = weather_weekly is None and hourly_weather is None and bool(args.no_weather_required)
     result = run_analysis_pipeline(
         influenza_weekly=influenza_weekly,
         weather_weekly=weather_weekly,
@@ -382,6 +481,8 @@ def _cmd_run_analysis_tables(args: argparse.Namespace) -> int:
         age_group_frame=age_group_frame,
         settings=settings,
         output=AnalysisOutputConfig(output_dir=args.output_dir),
+        feature_config=FeatureEngineeringConfig(temp_cols=()) if no_weather else None,
+        mechanistic_wave_config=_mechanistic_config(args),
     )
     _print_json(result.to_public_dict(include_heavy_objects=False))
     return EXIT_OK if result.status != "failed" else EXIT_FAILED
@@ -411,14 +512,103 @@ def _cmd_run_all(args: argparse.Namespace) -> int:
         raise_on_error=bool(args.raise_on_error),
         fail_on_evaluation_errors=bool(args.fail_on_evaluation_errors),
     )
+    analysis_settings = AnalysisPipelineSettings(
+        require_weather=not bool(args.no_weather),
+        run_mechanistic_wave=bool(args.mechanistic_wave),
+    )
+    extra: dict[str, Any] = {"mechanistic_wave_config": _mechanistic_config(args)}
+    if args.no_weather:
+        extra["feature_config"] = FeatureEngineeringConfig(temp_cols=())
     result = run_full_workflow_from_sources(
         source=source,
         llm=llm,
         settings=settings,
         output=FullWorkflowOutputConfig(output_dir=args.output_dir),
+        analysis_settings=analysis_settings,
+        extra_analysis_kwargs=extra,
     )
     _print_json(result.to_public_dict(include_heavy_objects=False))
     return EXIT_OK if result.status != "failed" else EXIT_FAILED
+
+
+def _load_local_tables(args: argparse.Namespace) -> tuple[Any, Any, Any]:
+    bundle = load_local_influenza(
+        args.city,
+        data_dir=args.data_dir,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        pcr_gap_policy=args.pcr_gap_policy,
+    )
+    weather = _read_table_with_dates(args.weather_weekly, parse_dates=("week_start",)) if args.weather_weekly else None
+    if bundle.pcr_imputed_weeks:
+        print(
+            f"[ai4epi] {args.city}: {bundle.pcr_imputed_weeks} нед. без данных ПЦР, доля положительных проб "
+            f"интерполирована (--pcr-gap-policy {args.pcr_gap_policy}).",
+            file=sys.stderr,
+        )
+    return bundle.weekly, bundle.cases, weather
+
+
+def _cmd_run_analysis_local(args: argparse.Namespace) -> int:
+    influenza_weekly, cases, weather_weekly = _load_local_tables(args)
+    settings = AnalysisPipelineSettings(
+        require_weather=weather_weekly is not None,
+        run_explainability=not bool(args.no_explainability),
+        run_epidemic_waves=not bool(args.no_epidemic_waves),
+        run_age_group_season=not bool(args.no_age_group),
+        build_context=not bool(args.no_context),
+        raise_on_error=bool(args.raise_on_error),
+        run_mechanistic_wave=bool(args.mechanistic_wave),
+    )
+    result = run_analysis_pipeline(
+        influenza_weekly=influenza_weekly,
+        weather_weekly=weather_weekly,
+        age_group_frame=cases,
+        settings=settings,
+        output=AnalysisOutputConfig(output_dir=args.output_dir),
+        feature_config=None if weather_weekly is not None else FeatureEngineeringConfig(temp_cols=()),
+        mechanistic_wave_config=_mechanistic_config(args),
+    )
+    _print_json(result.to_public_dict(include_heavy_objects=False))
+    return EXIT_OK if result.status != "failed" else EXIT_FAILED
+
+
+def _cmd_run_all_local(args: argparse.Namespace) -> int:
+    influenza_weekly, cases, weather_weekly = _load_local_tables(args)
+    llm = WorkflowLLMConfig(
+        model=args.model,
+        backend=args.backend,
+        base_url=args.base_url,
+        timeout_sec=args.timeout_sec,
+        evaluator_model=args.evaluator_model,
+        reuse_narrator_for_evaluation=args.evaluator_model is None,
+    )
+    settings = FullWorkflowSettings(
+        run_editor=not bool(args.no_editor),
+        run_evaluation=not bool(args.no_evaluation),
+        render_pdf=bool(args.render_pdf),
+        raise_on_error=bool(args.raise_on_error),
+        fail_on_evaluation_errors=bool(args.fail_on_evaluation_errors),
+    )
+    extra: dict[str, Any] = {"mechanistic_wave_config": _mechanistic_config(args)}
+    if weather_weekly is None:
+        extra["feature_config"] = FeatureEngineeringConfig(temp_cols=())
+    result = run_full_workflow_from_tables(
+        influenza_weekly=influenza_weekly,
+        weather_weekly=weather_weekly,
+        age_group_frame=cases,
+        llm=llm,
+        settings=settings,
+        output=FullWorkflowOutputConfig(output_dir=args.output_dir),
+        analysis_settings=AnalysisPipelineSettings(
+            require_weather=weather_weekly is not None,
+            run_mechanistic_wave=bool(args.mechanistic_wave),
+        ),
+        extra_analysis_kwargs=extra,
+    )
+    _print_json(result.to_public_dict(include_heavy_objects=False))
+    return EXIT_OK if result.status != "failed" else EXIT_FAILED
+
 
 def _cmd_generate_bulletin(args: argparse.Namespace) -> int:
     result = run_pipeline_from_config(args.config)

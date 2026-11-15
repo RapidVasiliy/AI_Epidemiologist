@@ -173,6 +173,7 @@ class RuntimeCheckConfig(StrictModel):
         "epidemic_wave_comparison",
         "age_group_season_overview",
         "forecast_risks",
+        "mechanistic_wave",
         "shap_interpretation",
         "model_quality",
         "model_description",

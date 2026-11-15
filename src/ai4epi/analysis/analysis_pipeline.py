@@ -16,6 +16,7 @@
     -> ``ShapRunResult``
     -> ``EpidemicWaveRunResult``
     -> optional ``AgeGroupSeasonRunResult``
+    -> optional ``MechanisticWaveRunResult`` (модель Барояна–Рвачёва)
     -> ``ContextBuildResult``.
 
 Два уровня API:
@@ -43,6 +44,13 @@ try:  # package import
         run_age_group_season_analysis,
     )
     from ai4epi.core.context import GlobalContext
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.context_builders import (
         ContextBuildConfig,
         ContextBuildResult,
@@ -100,6 +108,13 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         run_age_group_season_analysis,
     )
     from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.context_builders import (  # type: ignore[no-redef]
         ContextBuildConfig,
         ContextBuildResult,
@@ -188,6 +203,9 @@ class AnalysisPipelineSettings(StrictModel):
     run_epidemic_waves: bool = True
     run_age_group_season: bool = True
     require_age_group_season: bool = False
+    # Модель Барояна–Рвачёва (ai4epi.analysis.mechanistic_wave). По умолчанию
+    # выключена: требует extra-зависимостей [mechanistic] и минуты счёта MCMC.
+    run_mechanistic_wave: bool = False
     build_context: bool = True
     raise_on_error: bool = False
     save_source_artifacts: bool = True
@@ -217,6 +235,7 @@ class AnalysisOutputConfig(StrictModel):
     explainability_subdir: str = Field(default="explainability", min_length=1)
     epidemic_waves_subdir: str = Field(default="epidemic_waves", min_length=1)
     age_group_subdir: str = Field(default="age_group_season", min_length=1)
+    mechanistic_wave_subdir: str = Field(default="mechanistic_wave", min_length=1)
     save_run_report: bool = True
     save_merged_weekly: bool = True
     csv_encoding: str = Field(default="utf-8-sig", min_length=1)
@@ -231,6 +250,7 @@ class AnalysisOutputConfig(StrictModel):
         "explainability_subdir",
         "epidemic_waves_subdir",
         "age_group_subdir",
+        "mechanistic_wave_subdir",
     )
     @classmethod
     def validate_relative_name(cls, value: str) -> str:
@@ -264,6 +284,10 @@ class AnalysisOutputConfig(StrictModel):
         return self.output_dir / self.age_group_subdir
 
     @property
+    def mechanistic_wave_dir(self) -> Path:
+        return self.output_dir / self.mechanistic_wave_subdir
+
+    @property
     def context_path(self) -> Path:
         return self.output_dir / self.context_filename
 
@@ -282,6 +306,9 @@ class AnalysisOutputConfig(StrictModel):
 
     def make_age_group_output(self) -> AgeGroupSeasonOutputConfig:
         return AgeGroupSeasonOutputConfig(output_dir=self.age_group_dir)
+
+    def make_mechanistic_wave_output(self) -> MechanisticWaveOutputConfig:
+        return MechanisticWaveOutputConfig(output_dir=self.mechanistic_wave_dir)
 
     def make_context_output(self) -> ContextOutputConfig:
         return ContextOutputConfig(output_path=self.context_path)
@@ -318,6 +345,7 @@ class AnalysisRunResult(StrictModel):
     shap_result: ShapRunResult | None = None
     epidemic_wave_result: EpidemicWaveRunResult | None = None
     age_group_result: AgeGroupSeasonRunResult | None = None
+    mechanistic_wave_result: MechanisticWaveRunResult | None = None
     context_result: ContextBuildResult | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
@@ -359,6 +387,13 @@ class AnalysisRunResult(StrictModel):
             "has_shap_result": self.shap_result is not None,
             "has_epidemic_wave_result": self.epidemic_wave_result is not None,
             "has_age_group_result": self.age_group_result is not None,
+            "has_mechanistic_wave_result": self.mechanistic_wave_result is not None,
+            "mechanistic_wave_status": (
+                self.mechanistic_wave_result.status if self.mechanistic_wave_result is not None else None
+            ),
+            "mechanistic_wave_message": (
+                self.mechanistic_wave_result.message if self.mechanistic_wave_result is not None else None
+            ),
             "has_context": self.context_result is not None,
         }
         if self.context_result is not None:
@@ -389,6 +424,7 @@ def run_analysis_pipeline(
     explainability_config: ExplainabilityConfig | None = None,
     epidemic_wave_config: EpidemicWaveConfig | None = None,
     age_group_config: AgeGroupSeasonConfig | None = None,
+    mechanistic_wave_config: MechanisticWaveConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
 ) -> AnalysisRunResult:
@@ -412,8 +448,10 @@ def run_analysis_pipeline(
     shap_result: ShapRunResult | None = None
     epidemic_wave_result: EpidemicWaveRunResult | None = None
     age_group_result: AgeGroupSeasonRunResult | None = None
+    mechanistic_wave_result: MechanisticWaveRunResult | None = None
     context_result: ContextBuildResult | None = None
     error_message: str | None = None
+    context_extra: dict[str, Any] = dict(extra_context_blocks or {})
 
     try:
         fcfg = feature_config or FeatureEngineeringConfig()
@@ -478,6 +516,21 @@ def run_analysis_pipeline(
             else:
                 warnings.append("age_group_frame не передан; блок age_group_season не будет включён в GlobalContext.")
 
+        if cfg.run_mechanistic_wave:
+            mechanistic_wave_result = run_mechanistic_wave_analysis(
+                influenza_weekly,
+                origin_date=forecast_result.origin_date,
+                ml_forecast=ml_forecast_from_result(forecast_result),
+                config=mechanistic_wave_config,
+                output=out.make_mechanistic_wave_output() if out is not None else None,
+            )
+            artifacts.update(_prefix_artifacts("mechanistic_wave", mechanistic_wave_result.artifacts))
+            warnings.extend(f"mechanistic_wave: {w}" for w in mechanistic_wave_result.warnings)
+            # status "no_wave"/"insufficient_data" — штатная ситуация (шаг 3 схемы):
+            # блок не добавляется, секция не активируется, вывод — только по ML.
+            if mechanistic_wave_result.context_block is not None:
+                context_extra["mechanistic_wave"] = mechanistic_wave_result.context_block
+
         if cfg.build_context:
             if shap_result is None:
                 raise AnalysisPipelineError("GlobalContext требует shap_result; SHAP-pass не выполнен.")
@@ -488,7 +541,7 @@ def run_analysis_pipeline(
                 shap_result=shap_result,
                 epidemic_wave_comparison=epidemic_wave_result,
                 age_group_season=age_group_result,
-                extra_blocks=extra_context_blocks,
+                extra_blocks=context_extra or None,
                 config=context_config,
                 output=out.make_context_output() if out is not None else None,
             )
@@ -509,6 +562,7 @@ def run_analysis_pipeline(
         shap_result=shap_result,
         epidemic_wave_result=epidemic_wave_result,
         age_group_result=age_group_result,
+        mechanistic_wave_result=mechanistic_wave_result,
         context_result=context_result,
         artifacts=artifacts,
         warnings=warnings,
@@ -536,6 +590,7 @@ def run_analysis_pipeline_from_sources(
     explainability_config: ExplainabilityConfig | None = None,
     epidemic_wave_config: EpidemicWaveConfig | None = None,
     age_group_config: AgeGroupSeasonConfig | None = None,
+    mechanistic_wave_config: MechanisticWaveConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
     session: Any | None = None,
@@ -595,6 +650,7 @@ def run_analysis_pipeline_from_sources(
         explainability_config=explainability_config,
         epidemic_wave_config=epidemic_wave_config,
         age_group_config=age_group_config,
+        mechanistic_wave_config=mechanistic_wave_config,
         context_config=context_config,
         extra_context_blocks=extra_context_blocks,
     )

@@ -465,6 +465,13 @@ class FactualEvaluator(BaseEvaluator):
             "predicates": ["family_code", "strategy_code", "calibration_start_year"],
             "notes": "Нормализуй тип модели, стратегию многошагового прогноза и стартовый год калибровки.",
         },
+        "mechanistic_wave": {
+            "predicates": ["phase_code", "agreement_code"],
+            "notes": (
+                "Нормализуй фазу волны (growth/peak/decline/post_wave) и утверждение о согласии (agree) "
+                "или расхождении (disagree) прогнозов механистической модели и модели машинного обучения."
+            ),
+        },
         "age_group_season_overview": {
             "predicates": [
                 "highest_peak_group",
@@ -502,6 +509,11 @@ class FactualEvaluator(BaseEvaluator):
             self._add_claim(claims, "forecast_has_intermediate_rise", "forecast_risks", "has_intermediate_rise", True, weight=1.0)
         if forecast_sem.get("has_intermediate_decline"):
             self._add_claim(claims, "forecast_has_intermediate_decline", "forecast_risks", "has_intermediate_decline", True, weight=1.0)
+
+        mech_sem = _semantic(ctx, "mechanistic_wave")
+        if mech_sem:
+            self._add_claim(claims, "mechanistic_wave_phase_code", "mechanistic_wave", "phase_code", mech_sem.get("phase_code"), weight=2.0)
+            self._add_claim(claims, "mechanistic_wave_agreement_code", "mechanistic_wave", "agreement_code", mech_sem.get("agreement_code"), weight=2.0)
 
         age_sem = _semantic(ctx, "age_group_season")
         age_mapping = [
@@ -712,6 +724,8 @@ class FactualEvaluator(BaseEvaluator):
             return _semantic(ctx, "model_quality")
         if section == "age_group_season_overview":
             return _semantic(ctx, "age_group_season")
+        if section == "mechanistic_wave":
+            return _semantic(ctx, "mechanistic_wave")
         if section == "model_description":
             model_info = _as_mapping(ctx.get("model_info"))
             return {
@@ -1928,6 +1942,7 @@ def _narrative_section_names(bulletin: Mapping[str, Any]) -> list[str]:
         "epidemic_wave_comparison",
         "age_group_season_overview",
         "forecast_risks",
+        "mechanistic_wave",
         "shap_interpretation",
         "model_quality",
         "model_description",

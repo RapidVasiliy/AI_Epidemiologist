@@ -124,9 +124,11 @@ class FeatureEngineeringConfig(StrictModel):
 
     @field_validator("temp_cols")
     @classmethod
-    def _temp_cols_not_empty(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+    def _validate_temp_cols(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        # Пустой кортеж допустим: модель без погодных признаков (например, для
+        # общероссийского ряда или при отсутствии доступа к Open-Meteo).
         if not value:
-            raise ValueError("temp_cols не должен быть пустым.")
+            return ()
         return _validate_unique_non_negative_names(value, field_name="temp_cols")
 
     @field_validator("y_lags", "temp_lags", "y_roll_windows", "temp_roll_windows", "growth_lags")
@@ -342,7 +344,7 @@ def normalize_weekly_frame(
         raise WeeklyFrameError(f"В недельном ряду есть повторяющиеся даты: {duplicates!r}.")
 
     if cfg.require_monday_week_start:
-        non_monday = out.loc[out[cfg.datetime_col].dt.dayofweek != 0, cfg.datetime_col].head(10).tolist()
+        non_monday = out.loc[out[cfg.datetime_col].dt.day_of_week != 0, cfg.datetime_col].head(10).tolist()
         if non_monday:
             raise WeeklyFrameError(f"Ожидались даты-понедельники начала ISO-недели. Примеры: {non_monday!r}.")
 
