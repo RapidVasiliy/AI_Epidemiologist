@@ -179,7 +179,7 @@ class MechanisticWaveConfig(StrictModel):
     # группа i содержит лишь регистрируемую долю kappa_i заражённых. Поэтому столбец
     # источника i делится на kappa_i (истинное число заразных = I_i / kappa_i).
     age_contact_kappa_correction: bool = True
-    age_matrix_scale_upper: float = Field(default=3.0, gt=0.0)
+    age_matrix_scale_upper: float = Field(default=10.0, gt=0.0)
 
 
 class MechanisticWaveOutputConfig(StrictModel):
