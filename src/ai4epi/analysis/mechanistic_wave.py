@@ -134,6 +134,12 @@ class MechanisticWaveConfig(StrictModel):
     peak_tolerance_weeks: int = Field(default=1, ge=0)
     direction_change_pct_threshold: float = Field(default=10.0, gt=0.0)
     agreement_relative_gap_pct: float = Field(default=50.0, gt=0.0)
+    # Знаменатель относительного разрыва не меньше этого уровня (на 10 тыс.):
+    # при малых значениях разница в доли единицы не считается расхождением.
+    agreement_gap_floor_per_10k: float = Field(default=5.0, ge=0.0)
+    # После завершения основной волны модель БР не используется для вывода
+    # (шаг 7 схемы статьи), поэтому согласие не оценивается.
+    agreement_skip_post_wave: bool = True
     rhat_threshold: float = Field(default=1.05, gt=1.0)
     round_digits: int = Field(default=3, ge=0, le=8)
     # --- возрастная модель (0–14 / 15+), см. AgeGroupBRModel ---------------
@@ -434,7 +440,7 @@ def build_mechanistic_wave_context(
     phase, peak_block, wave_end = summarize_wave(best, bundle, dates, last_idx, cfg)
     current_value = float(observed[-1])
     horizons, comparison, cmp_warnings = compare_with_ml(
-        current_value, best, q05, q95, dates, last_idx, ml_forecast, cfg
+        current_value, best, q05, q95, dates, last_idx, ml_forecast, cfg, phase=phase
     )
     warnings.extend(cmp_warnings)
     br_dir = comparison["br_direction_code"]
@@ -562,8 +568,20 @@ def compare_with_ml(
     last_idx: int,
     ml_forecast: JsonObject | None,
     cfg: MechanisticWaveConfig,
+    phase: str | None = None,
 ) -> tuple[list[JsonObject], JsonObject, list[str]]:
-    """Значения модели БР и ML на горизонтах 1..h и код согласия (шаг 5 схемы)."""
+    """Значения модели БР и ML на горизонтах 1..h и код согласия (шаг 5 схемы).
+
+    Согласие: одинаковое направление (изменение от текущей недели к h, порог
+    ``direction_change_pct_threshold``) и средний разрыв значений
+    ``|БР − ML| / max(|ML|, agreement_gap_floor_per_10k)`` не больше
+    ``agreement_relative_gap_pct``. В фазе ``post_wave`` (при
+    ``agreement_skip_post_wave``) согласие не оценивается.
+
+    Пороги проверены скользящим бэктестом (docs/backtest.md): на неделях волны
+    при «расхождении» ошибка ML примерно вдвое выше, а покрытие его интервалов
+    заметно ниже номинального.
+    """
 
     rd = cfg.round_digits
     dates = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
@@ -607,11 +625,17 @@ def compare_with_ml(
         "agreement_code": None,
         "agreement": None,
         "disagreement_reasons": [],
+        "agreement_note": None,
     }
-    if all(r["ml_value"] is not None for r in horizons):
+    if phase == "post_wave" and cfg.agreement_skip_post_wave:
+        comparison["agreement_note"] = (
+            "основная волна по модели Барояна–Рвачёва завершилась; для вывода используется только ML-прогноз"
+        )
+    elif all(r["ml_value"] is not None for r in horizons):
         ml_h = float(horizons[-1]["ml_value"])
         ml_dir = _direction(current_value, ml_h, cfg.direction_change_pct_threshold)
-        gap = float(np.mean([abs(r["br_value"] - r["ml_value"]) / max(abs(r["ml_value"]), 1e-9) * 100.0 for r in horizons]))
+        floor = max(cfg.agreement_gap_floor_per_10k, 1e-9)
+        gap = float(np.mean([abs(r["br_value"] - r["ml_value"]) / max(abs(r["ml_value"]), floor) * 100.0 for r in horizons]))
         reasons = []
         if ml_dir != br_dir:
             reasons.append("direction")
@@ -717,7 +741,7 @@ def run_age_group_mechanistic(
         q95 = np.percentile(bundle_g, 95, axis=0) if bundle_g is not None else None
         phase, peak, wave_end = summarize_wave(best[g], bundle_g, dates, last_idx, cfg)
         horizons, comparison, cmp_w = compare_with_ml(
-            float(obs_g[-1]), best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg
+            float(obs_g[-1]), best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg, phase=phase
         )
         warnings.extend(f"{code}: {w}" for w in cmp_w if "не передан" not in w)
         groups_out.append(

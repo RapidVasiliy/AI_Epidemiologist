@@ -156,6 +156,7 @@ The main engineering principle is separation of responsibilities:
 ├── data/regions/          # local xlsx surveillance data (spb, samara, chelyabinsk)
 ├── docs/
 │   ├── age_groups.md
+│   ├── backtest.md
 │   ├── mechanistic_wave.md
 │   └── review.md
 ├── tests/
@@ -169,6 +170,8 @@ The main engineering principle is separation of responsibilities:
         │   ├── age_group_forecast.py # ML forecast by age group
         │   ├── age_group_season.py
         │   ├── analysis_pipeline.py
+        │   ├── backtest.py           # rolling weekly backtest
+        │   ├── data_quality.py       # data quality, baselines, reliability
         │   ├── context_builders.py
         │   ├── epidemic_waves.py
         │   ├── explainability.py
@@ -263,6 +266,7 @@ run-analysis-tables
 run-analysis-local
 run-all
 run-all-local
+backtest-local
 generate-bulletin
 evaluate-bulletin
 render
@@ -990,6 +994,10 @@ Details, defaults and differences from the original code: [docs/mechanistic_wave
 
 Age groups (0–14 / 15+): a corrected age-structured Baroyan–Rvachev model (`--br-age-groups`) and a per-group ML forecast (`--age-forecast`), see [docs/age_groups.md](docs/age_groups.md).
 
+Data quality and baselines: every analysis run builds a `data_quality` block (share of weeks with imputed PCR data, New-Year weeks, skill of the forecast against naive and climatological baselines) and a reliability code `ok` / `reduced` / `low`; the forecast and model-quality sections must disclose reduced reliability (runtime rule `low_reliability_disclosed`).
+
+Rolling backtest of the whole scheme (weekly retraining, intervals, Baroyan–Rvachev model, agreement rule): `ai4epi backtest-local --city spb --start 2018-05-07 --end 2019-04-29 --output-dir runs/backtest_spb`. Results: [docs/backtest.md](docs/backtest.md).
+
 Known weaknesses and the improvement plan: [docs/review.md](docs/review.md).
 
 ---
@@ -1027,7 +1035,7 @@ Important limitations:
 
 ```bash
 python -m pip install -e ".[dev,mechanistic]"
-python -m pytest                  # all tests, ~2.5 min
+python -m pytest                  # all tests, ~3 min
 python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~20 s
 ```
 

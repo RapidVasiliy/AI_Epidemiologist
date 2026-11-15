@@ -35,9 +35,9 @@ def test_spb_weekly_matches_legacy_formula(data_dir):
 
 
 def test_pcr_gaps_interpolated_and_flagged(data_dir):
-    interp = load_local_influenza("chelyabinsk", data_dir=data_dir, start_date="2022-11-28", end_date="2022-12-26")
+    interp = load_local_influenza("chelyabinsk", data_dir=data_dir, start_date="2022-11-28", end_date="2023-01-02")
     zero = load_local_influenza(
-        "chelyabinsk", data_dir=data_dir, start_date="2022-11-28", end_date="2022-12-26", pcr_gap_policy="zero"
+        "chelyabinsk", data_dir=data_dir, start_date="2022-11-28", end_date="2023-01-02", pcr_gap_policy="zero"
     )
     w_i = interp.weekly.set_index("datetime")
     w_z = zero.weekly.set_index("datetime")

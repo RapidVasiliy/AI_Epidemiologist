@@ -115,6 +115,7 @@ def load_local_cases(
     *,
     data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR,
     pcr_gap_policy: PcrGapPolicy = "interpolate",
+    end_date: date | datetime | str | None = None,
 ) -> tuple[pd.DataFrame, int]:
     """Прочитать cases.xlsx + pcr.xlsx и привести к контракту ``cases``.
 
@@ -129,6 +130,9 @@ def load_local_cases(
       на такой неделе равна нулю.
 
     В обоих режимах отбрасываются последние недели без ПЦР (неполная выгрузка).
+    ``end_date`` обрезает ряд *до* обработки пропусков: интерполяция не
+    использует данные ПЦР недель после ``end_date`` (состояние «как было
+    известно на дату», без заглядывания вперёд).
     Возвращает таблицу и число отброшенных последних недель.
     """
 
@@ -159,6 +163,8 @@ def load_local_cases(
 
     merged = cases.merge(pcr, on="datetime", how="left", validate="one_to_one")
     merged = merged.sort_values("datetime").reset_index(drop=True)
+    if end_date is not None:
+        merged = merged[merged["datetime"] <= pd.Timestamp(end_date)].reset_index(drop=True)
 
     dropped = 0
     while len(merged) and pd.isna(merged["tested_total"].iloc[-1]):
@@ -202,11 +208,9 @@ def load_local_influenza(
     ``end_date`` позволяет воспроизвести состояние системы на прошлую неделю.
     """
 
-    cases, dropped = load_local_cases(city, data_dir=data_dir, pcr_gap_policy=pcr_gap_policy)
+    cases, dropped = load_local_cases(city, data_dir=data_dir, pcr_gap_policy=pcr_gap_policy, end_date=end_date)
     if start_date is not None:
         cases = cases[cases["datetime"] >= pd.Timestamp(start_date)]
-    if end_date is not None:
-        cases = cases[cases["datetime"] <= pd.Timestamp(end_date)]
     cases = cases.reset_index(drop=True)
     if cases.empty:
         raise LocalDataError(f"Для города {city!r} нет данных в заданном интервале дат.")

@@ -100,3 +100,27 @@ def test_section_registered_and_optional():
     assert section.required is False and section.activation_path == "mechanistic_wave"
     ids = registry.section_ids()
     assert ids.index("forecast_risks") < ids.index("mechanistic_wave") < ids.index("shap_interpretation")
+
+
+def test_agreement_not_assessed_after_wave(synthetic_weekly):
+    full = synthetic_weekly()
+    cfg = FAST.model_copy(update={"calibration_start_date": full["datetime"].iloc[6].date()})
+    weekly = full.iloc[:27]  # фаза post_wave
+    ml = {"point": [5.0] * 4, "lo": [0.0] * 4, "hi": [10.0] * 4, "dates": []}
+    block = run_mechanistic_wave_analysis(weekly, ml_forecast=ml, config=cfg).context_block
+    assert block["phase_code"] == "post_wave"
+    assert block["comparison_with_ml"]["agreement_code"] is None
+    assert block["comparison_with_ml"]["agreement_note"]
+
+
+def test_small_absolute_gaps_are_not_disagreement():
+    from ai4epi.analysis.mechanistic_wave import compare_with_ml
+
+    dates = pd.Series(pd.date_range("2020-01-06", periods=6, freq="7D"))
+    best = np.array([1.0, 1.0, 1.0, 1.2, 1.4, 1.6])  # БР: рост с 1 до 1.6 на 10 тыс.
+    ml = {"point": [3.0, 3.5, 4.0, 4.5], "lo": [0.0] * 4, "hi": [9.0] * 4, "dates": []}  # ML примерно втрое выше
+    _, cmp_floor, _ = compare_with_ml(1.0, best, None, None, dates, 1, ml, MechanisticWaveConfig())
+    assert cmp_floor["agreement_code"] == "agree"  # разница < 5 на 10 тыс. не считается расхождением
+    strict = MechanisticWaveConfig(agreement_gap_floor_per_10k=0.0)
+    _, cmp_strict, _ = compare_with_ml(1.0, best, None, None, dates, 1, ml, strict)
+    assert "scale" in cmp_strict["disagreement_reasons"]

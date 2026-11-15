@@ -168,6 +168,14 @@ class RuntimeCheckConfig(StrictModel):
         "временн",
         "впоследств",
     )
+    reliability_markers: tuple[str, ...] = (
+        "надежн",
+        "наивн",
+        "осторожн",
+        "ограниченн",
+        "низк",
+        "понижен",
+    )
     prose_section_ids: tuple[str, ...] = (
         "current_situation",
         "epidemic_wave_comparison",
@@ -434,6 +442,7 @@ class RuntimeChecker:
             self._rule_correct_interval_terminology,
             self._rule_adverse_scenario_is_high_incidence,
             self._rule_forecast_trend_matches_numbers,
+            self._rule_low_reliability_disclosed,
         )
         issues: list[RuntimeIssue] = []
         checks = 0
@@ -474,6 +483,33 @@ class RuntimeChecker:
                 "threshold_pct": self.config.high_uncertainty_pct_threshold,
                 "found_phrases": found,
             },
+        )
+
+    def _rule_low_reliability_disclosed(
+        self,
+        ctx: Mapping[str, Any],
+        sections: Mapping[str, Any],
+    ) -> RuntimeIssue | None:
+        """Пониженная надёжность прогноза (блок data_quality) должна быть названа в тексте."""
+
+        code = _get_path(ctx, "data_quality.semantic.reliability_code", default=None)
+        if code not in {"reduced", "low"}:
+            return None
+        checked = [sid for sid in ("forecast_risks", "model_quality") if sid in sections]
+        missing = [
+            sid
+            for sid in checked
+            if not any(marker in normalize_ru(section_text(sections, sid)) for marker in self.config.reliability_markers)
+        ]
+        if not missing:
+            return None
+        return RuntimeIssue(
+            category=IssueCategory.LOGIC,
+            severity=IssueSeverity.ERROR if code == "low" else IssueSeverity.WARN,
+            section_id=missing[0],
+            check_name="low_reliability_disclosed",
+            message="Надёжность прогноза снижена (data_quality), но секция об этом не сообщает.",
+            detail={"reliability_code": code, "sections_without_disclosure": missing},
         )
 
     def _rule_correct_interval_terminology(

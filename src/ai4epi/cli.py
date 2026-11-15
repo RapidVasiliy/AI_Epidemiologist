@@ -138,6 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_analysis_local_command(subparsers)
     _add_run_all_command(subparsers)
     _add_run_all_local_command(subparsers)
+    _add_backtest_local_command(subparsers)
     _add_generate_bulletin_command(subparsers)
     _add_evaluate_bulletin_command(subparsers)
     _add_render_command(subparsers)
@@ -330,6 +331,57 @@ def _add_run_all_local_command(subparsers: argparse._SubParsersAction[argparse.A
     parser.add_argument("--fail-on-evaluation-errors", action="store_true", help="Считать ошибки evaluation фатальными.")
     _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_all_local)
+
+
+
+def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "backtest-local",
+        help="Скользящий бэктест по локальным xlsx: еженедельное переобучение ML, модель БР, согласие моделей.",
+    )
+    parser.add_argument("--city", required=True, help="Каталог города в --data-dir: spb, samara, chelyabinsk.")
+    parser.add_argument("--data-dir", default=DEFAULT_LOCAL_DATA_DIR, type=Path, help="Каталог с <city>/cases.xlsx и pcr.xlsx.")
+    parser.add_argument("--start", required=True, help="Первая неделя проверки (YYYY-MM-DD).")
+    parser.add_argument("--end", required=True, help="Последняя неделя проверки (YYYY-MM-DD).")
+    parser.add_argument("--output-dir", default="runs/backtest", type=Path, help="Каталог: predictions.csv, metrics.json, report.md.")
+    parser.add_argument("--no-mechanistic", action="store_true", help="Не калибровать модель Барояна–Рвачёва на каждой неделе.")
+    parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing"), default="mcmc", help="Метод калибровки модели БР.")
+    parser.add_argument("--fast-variant", action="store_true", help="Дополнительно оценить быстрый HGB (learning_rate 0.03, 300 итераций).")
+    parser.add_argument("--warmup-weeks", type=int, default=52, help="Недели разогрева для конформных интервалов (не входят в метрики).")
+    parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР.")
+    parser.add_argument("--n-jobs", type=int, default=None, help="Число процессов (по умолчанию — все ядра).")
+    parser.set_defaults(handler=_cmd_backtest_local)
+
+
+def _cmd_backtest_local(args: argparse.Namespace) -> int:
+    from ai4epi.analysis.backtest import BacktestConfig, LocalDataAt, run_backtest
+    from ai4epi.analysis.forecasting import HistGradientBoostingPointConfig
+
+    variants = {"hgb": HistGradientBoostingPointConfig()}
+    if args.fast_variant:
+        variants["hgb_fast"] = HistGradientBoostingPointConfig(learning_rate=0.03, max_iter=300)
+    kwargs: dict[str, Any] = {}
+    if args.n_jobs:
+        kwargs["n_jobs"] = args.n_jobs
+    cfg = BacktestConfig(
+        start=args.start,
+        end=args.end,
+        model_variants=variants,
+        run_mechanistic=not args.no_mechanistic,
+        mechanistic=MechanisticWaveConfig(method=args.br_method, cores=1),
+        interval_warmup_weeks=args.warmup_weeks,
+        **kwargs,
+    )
+    truth = load_local_influenza(args.city, data_dir=args.data_dir, pcr_gap_policy=args.pcr_gap_policy).weekly
+    result = run_backtest(
+        LocalDataAt(args.city, args.data_dir, args.pcr_gap_policy),
+        truth,
+        config=cfg,
+        output_dir=args.output_dir,
+        label=f"{args.city}, {args.start} – {args.end}",
+    )
+    _print_json({"artifacts": {k: str(v) for k, v in result.artifacts.items()}, "overall": result.metrics["overall_common_points"]})
+    return EXIT_OK
 
 
 def _add_generate_bulletin_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

@@ -438,6 +438,9 @@ FORECAST_RISKS_PROMPT = (
     "принимающего решения. "
     "АБЗАЦ 3 (risk_assessment): дай сдержанную оценку риска для недельного мониторинга "
     "на ближайшие 4 недели. Не выходи за рамки данных и не делай причинных выводов. "
+    "Если forecast_reliability не равно 'обычная', обязательно напиши, что надёжность количественного "
+    "прогноза на этой неделе пониженная или низкая (по значению forecast_reliability), и кратко назови "
+    "причины из reliability_reasons. "
     "ПРАВИЛА: используй только данные из JSON-контекста; не придумывай дополнительные факты; "
     "используй только недельную шкалу времени — не пиши про дни, сутки, вчера, сегодня или месяцы; "
     "стиль официальный и нейтральный."
@@ -474,6 +477,10 @@ MODEL_QUALITY_PROMPT = (
     "bias_description_ru, по месяцам peak_error_months и по статистике ошибок. "
     "Объясни, что это означает для практического использования прогноза. "
     "Не добавляй недоказанные причины ошибок. "
+    "Сравни модель с базовыми прогнозами из baselines: наивным (persistence — значение текущей недели) и "
+    "климатическим (climatology — среднее той же недели в прошлых сезонах) по MAE и mae_skill. Если "
+    "reliability не равно 'обычная', в limitations_text прямо назови надёжность и причины из reliability_reasons; "
+    "если mae_skill относительно наивного прогноза ≤ 0, напиши, что модель не точнее наивного прогноза. "
     "СТИЛЬ: нейтральный, для специалиста. Аббревиатуры MAE, RMSE и R² можно "
     "использовать как общепринятые обозначения."
 )
@@ -511,6 +518,8 @@ MECHANISTIC_WAVE_PROMPT = (
     "максимум — механистическая модель. Если agreement_code='disagree', напиши, что прогнозы расходятся "
     "(по направлению и/или масштабу — disagreement_reasons), что это признак повышенной неопределённости и "
     "что прогнозы не усредняются. Если diagnostics.converged=false, добавь, что оценки параметров неустойчивы. "
+    "Если agreement_code равен null и задано agreement_note (волна завершилась), напиши, что сопоставление "
+    "моделей не проводится и вывод опирается на ML-прогноз. "
     "Если age_groups не null, добавь в phase_text одно-два предложения о фазе и сроке максимума по возрастным "
     "группам (age_groups.groups[].phase_label, peak) и о том, на сколько недель максимум у детей опережает "
     "максимум у взрослых (children_peak_lead_weeks); не интерпретируй contact_matrix. "
@@ -625,6 +634,8 @@ def default_section_configs() -> list[SectionConfig]:
                 "relative_uncertainty_pct": "forecast.relative_uncertainty_pct",
                 "max_interval_width": "forecast.max_interval_width",
                 "semantic": "forecast.semantic",
+                "forecast_reliability": "data_quality.reliability",
+                "reliability_reasons": "data_quality.reasons",
             },
         ),
         SectionConfig(
@@ -725,6 +736,10 @@ def default_section_configs() -> list[SectionConfig]:
                 "error_stats_h1": "model_quality.error_stats_h1",
                 "bias_description_ru": "model_quality.worst_case_pattern",
                 "semantic": "model_quality.semantic",
+                "baselines": "data_quality.baselines",
+                "reliability": "data_quality.reliability",
+                "reliability_reasons": "data_quality.reasons",
+                "pcr_imputation": "data_quality.pcr_imputation",
             },
         ),
         SectionConfig(

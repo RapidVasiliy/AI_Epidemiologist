@@ -16,6 +16,7 @@
     -> ``ShapRunResult``
     -> ``EpidemicWaveRunResult``
     -> optional ``AgeGroupSeasonRunResult``
+    -> ``data_quality`` (качество данных, сравнение с наивными прогнозами)
     -> optional ``AgeGroupForecastRunResult`` (ML-прогноз по возрастным группам)
     -> optional ``MechanisticWaveRunResult`` (модель Барояна–Рвачёва, в т. ч. по возрастам)
     -> ``ContextBuildResult``.
@@ -52,6 +53,7 @@ try:  # package import
         run_age_group_forecast,
     )
     from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.mechanistic_wave import (
         MechanisticWaveConfig,
         MechanisticWaveOutputConfig,
@@ -123,6 +125,7 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         run_age_group_forecast,
     )
     from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.mechanistic_wave import (
         MechanisticWaveConfig,
         MechanisticWaveOutputConfig,
@@ -451,6 +454,7 @@ def run_analysis_pipeline(
     age_group_config: AgeGroupSeasonConfig | None = None,
     mechanistic_wave_config: MechanisticWaveConfig | None = None,
     age_group_forecast_config: AgeGroupForecastConfig | None = None,
+    data_quality_config: DataQualityConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
 ) -> AnalysisRunResult:
@@ -543,6 +547,11 @@ def run_analysis_pipeline(
             else:
                 warnings.append("age_group_frame не передан; блок age_group_season не будет включён в GlobalContext.")
 
+        data_quality = build_data_quality_block(influenza_weekly, forecast_result, config=data_quality_config)
+        context_extra["data_quality"] = data_quality
+        if out is not None:
+            dq_path = write_json(data_quality, out.output_dir / "data_quality.json")
+            artifacts["data_quality"] = str(dq_path)
         mw_cfg = mechanistic_wave_config or MechanisticWaveConfig()
         age_weekly: dict[str, pd.DataFrame] | None = None
         if cfg.run_age_group_forecast or (cfg.run_mechanistic_wave and mw_cfg.age_groups):
@@ -587,6 +596,9 @@ def run_analysis_pipeline(
             # блок не добавляется, секция не активируется, вывод — только по ML.
             if mechanistic_wave_result.context_block is not None:
                 context_extra["mechanistic_wave"] = mechanistic_wave_result.context_block
+                agreement = mechanistic_wave_result.context_block["comparison_with_ml"].get("agreement_code")
+                if agreement == "disagree":
+                    add_reliability_reason(data_quality, "models_disagree", severity=1)
 
         if age_group_forecast_result is not None:
             age_block = age_group_forecast_result.context_block
@@ -609,6 +621,13 @@ def run_analysis_pipeline(
                     else None
                 )
             context_extra["age_group_forecast"] = age_block
+
+        if data_quality["reliability_code"] != "ok":
+            warnings.append(
+                f"data_quality: надёжность прогноза {data_quality['reliability']}: " + "; ".join(data_quality["reasons"])
+            )
+        if out is not None:
+            write_json(data_quality, out.output_dir / "data_quality.json")
 
         if cfg.build_context:
             if shap_result is None:
@@ -672,6 +691,7 @@ def run_analysis_pipeline_from_sources(
     age_group_config: AgeGroupSeasonConfig | None = None,
     mechanistic_wave_config: MechanisticWaveConfig | None = None,
     age_group_forecast_config: AgeGroupForecastConfig | None = None,
+    data_quality_config: DataQualityConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
     session: Any | None = None,
@@ -733,6 +753,7 @@ def run_analysis_pipeline_from_sources(
         age_group_config=age_group_config,
         mechanistic_wave_config=mechanistic_wave_config,
         age_group_forecast_config=age_group_forecast_config,
+        data_quality_config=data_quality_config,
         context_config=context_config,
         extra_context_blocks=extra_context_blocks,
     )
