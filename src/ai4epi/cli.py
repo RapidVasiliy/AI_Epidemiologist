@@ -346,7 +346,7 @@ def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.
     parser.add_argument("--output-dir", default="runs/backtest", type=Path, help="Каталог: predictions.csv, metrics.json, report.md.")
     parser.add_argument("--no-mechanistic", action="store_true", help="Не калибровать модель Барояна–Рвачёва на каждой неделе.")
     parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing"), default="mcmc", help="Метод калибровки модели БР.")
-    parser.add_argument("--fast-variant", action="store_true", help="Дополнительно оценить быстрый HGB (learning_rate 0.03, 300 итераций).")
+    parser.add_argument("--legacy-variant", action="store_true", help="Дополнительно оценить исходный HGB (learning_rate 0.001, 8000 итераций).")
     parser.add_argument("--warmup-weeks", type=int, default=52, help="Недели разогрева для конформных интервалов (не входят в метрики).")
     parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР.")
     parser.add_argument("--n-jobs", type=int, default=None, help="Число процессов (по умолчанию — все ядра).")
@@ -355,11 +355,11 @@ def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.
 
 def _cmd_backtest_local(args: argparse.Namespace) -> int:
     from ai4epi.analysis.backtest import BacktestConfig, LocalDataAt, run_backtest
-    from ai4epi.analysis.forecasting import HistGradientBoostingPointConfig
+    from ai4epi.analysis.forecasting import HistGradientBoostingPointConfig, legacy_point_config
 
     variants = {"hgb": HistGradientBoostingPointConfig()}
-    if args.fast_variant:
-        variants["hgb_fast"] = HistGradientBoostingPointConfig(learning_rate=0.03, max_iter=300)
+    if args.legacy_variant:
+        variants["hgb_legacy"] = legacy_point_config()
     kwargs: dict[str, Any] = {}
     if args.n_jobs:
         kwargs["n_jobs"] = args.n_jobs

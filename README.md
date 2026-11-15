@@ -996,6 +996,8 @@ Age groups (0–14 / 15+): a corrected age-structured Baroyan–Rvachev model (`
 
 Data quality and baselines: every analysis run builds a `data_quality` block (share of weeks with imputed PCR data, New-Year weeks, skill of the forecast against naive and climatological baselines) and a reliability code `ok` / `reduced` / `low`; the forecast and model-quality sections must disclose reduced reliability (runtime rule `low_reliability_disclosed`).
 
+Defaults changed after the backtest: conformal intervals are scaled by the current level (`ForecastingConfig.interval_scaling="level"`; coverage of the 80 % interval on epidemic weeks 0.50 → 0.83) and HGB uses the fast setting (learning rate 0.03, 300 iterations; one analysis run 45 s → 5 s, same accuracy). The original settings: `interval_scaling="absolute"`, `legacy_point_config()`.
+
 Rolling backtest of the whole scheme (weekly retraining, intervals, Baroyan–Rvachev model, agreement rule): `ai4epi backtest-local --city spb --start 2018-05-07 --end 2019-04-29 --output-dir runs/backtest_spb`. Results: [docs/backtest.md](docs/backtest.md).
 
 Known weaknesses and the improvement plan: [docs/review.md](docs/review.md).
@@ -1035,7 +1037,7 @@ Important limitations:
 
 ```bash
 python -m pip install -e ".[dev,mechanistic]"
-python -m pytest                  # all tests, ~3 min
+python -m pytest                  # all tests, ~1 min
 python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~20 s
 ```
 

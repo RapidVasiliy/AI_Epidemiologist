@@ -102,7 +102,7 @@
 ## Проверки
 
 ```bash
-python -m pytest            # 48 тестов, ~3 мин; -m "not slow" — 42 теста, ~20 с
+python -m pytest            # 48 тестов, ~1 мин; -m "not slow" — 42 теста, ~20 с
 ```
 
 * `tests/test_mechanistic_models.py` — совпадение с исходным циклом, инварианты, калибровка на
