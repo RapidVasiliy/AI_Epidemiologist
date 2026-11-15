@@ -154,11 +154,14 @@ The main engineering principle is separation of responsibilities:
 ├── pyproject.toml
 ├── README.md
 ├── data/regions/          # local xlsx surveillance data (spb, samara, chelyabinsk)
+├── research/
+│   └── multistrain_calibration/  # multi-strain BR model: ports, experiments, results
 ├── docs/
 │   ├── age_groups.md
 │   ├── backtest.md
 │   ├── mechanistic_wave.md
-│   └── review.md
+│   ├── review.md
+│   └── rscf_uncertainty.md
 ├── tests/
 ├── runs/
 │   ├── latest_narrators/
@@ -1001,6 +1004,8 @@ Defaults changed after the backtest: conformal intervals are scaled by the curre
 Rolling backtest of the whole scheme (weekly retraining, intervals, Baroyan–Rvachev model, agreement rule): `ai4epi backtest-local --city spb --start 2018-05-07 --end 2019-04-29 --output-dir runs/backtest_spb`. Results: [docs/backtest.md](docs/backtest.md).
 
 Known weaknesses and the improvement plan: [docs/review.md](docs/review.md).
+
+Research: calibration of the multi-strain Baroyan–Rvachev model (why the RJNAMM 2021 calibration failed, six cities) — [research/multistrain_calibration](research/multistrain_calibration/README.md); what the RSCF_Uncertainty repository offers to the project — [docs/rscf_uncertainty.md](docs/rscf_uncertainty.md).
 
 ---
 

@@ -68,6 +68,10 @@ mechanistic = [
   "optuna>=4.0",
   "scipy>=1.11"
 ]
+research = [
+  "numba>=0.59",
+  "scipy>=1.11"
+]
 notebook = [
   "ipykernel>=6.29",
   "jupyterlab>=4.1",
@@ -94,6 +98,8 @@ include = ["ai4epi*"]
 target-version = "py311"
 line-length = 120
 src = ["src", "tests"]
+# дословные копии исходного кода моделей (эталоны для проверки портов)
+extend-exclude = ["research/multistrain_calibration/legacy_v4b", "research/multistrain_calibration/reference_v2"]
 
 [tool.ruff.lint]
 select = [
