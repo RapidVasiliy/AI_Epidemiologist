@@ -99,7 +99,7 @@ target-version = "py311"
 line-length = 120
 src = ["src", "tests"]
 # дословные копии исходного кода моделей (эталоны для проверки портов)
-extend-exclude = ["research/multistrain_calibration/legacy_v4b", "research/multistrain_calibration/reference_v2"]
+extend-exclude = ["research/multistrain_calibration/legacy_v4b", "research/multistrain_calibration/reference_v2", "research/contact_matrix_uncertainty"]
 
 [tool.ruff.lint]
 select = [
