@@ -62,9 +62,52 @@ def test_weekly_requires_whole_weeks():
         sim.weekly_newly_infected()
 
 
-def test_age_model_shapes():
-    sim = get_model("age").simulate(ModelParams([0.5, 0.4], [0.3, 0.2, 0.1, 0.4], 100_000, [10.0, 10.0]), 70)
+def _age_params(alpha, beta, rho_g=(100_000.0, 400_000.0), i0=(60.0, 40.0)):
+    return ModelParams(list(alpha), list(beta), int(sum(rho_g)), list(i0), group_population_sizes=list(rho_g))
+
+
+def test_age_model_shapes_and_requires_group_sizes():
+    sim = get_model("age").simulate(_age_params([0.5, 0.4], [0.3, 0.2, 0.1, 0.4]), 70)
     assert sim.weekly_newly_infected().shape == (2, 10)
+    with pytest.raises(ValueError, match="group_population_sizes"):
+        get_model("age").simulate(ModelParams([0.5, 0.4], [0.3] * 4, 500_000, [10.0, 10.0]), 70)
+
+
+def test_age_model_reduces_to_total_model():
+    """Одинаковые alpha и все элементы матрицы контактов -> сумма групп = общая модель."""
+
+    age = get_model("age").simulate(_age_params([0.6, 0.6], [0.7] * 4), 210)
+    total = get_model("total").simulate(ModelParams([0.6], [0.7], 500_000, [100.0]), 210)
+    np.testing.assert_allclose(age.newly_infected.sum(axis=0), total.newly_infected[0], rtol=1e-6)
+
+
+def test_age_model_has_cross_group_transmission():
+    """Взрослые без собственной передачи (B[1,1]=0) заражаются только от детей."""
+
+    no_cross = get_model("age").simulate(_age_params([0.6, 0.6], [5.0, 0.0, 0.0, 0.0]), 140)
+    with_cross = get_model("age").simulate(_age_params([0.6, 0.6], [5.0, 0.0, 0.8, 0.0]), 140)
+    assert no_cross.newly_infected[1, 1:].sum() == 0.0
+    assert with_cross.newly_infected[1, 1:].sum() > 1000.0
+
+
+def test_age_model_respects_group_susceptibles():
+    sim = get_model("age").simulate(_age_params([0.3, 0.5], [3.0, 1.0, 1.0, 3.0]), 280)
+    infected_total = sim.newly_infected[:, 1:].sum(axis=1)
+    assert infected_total[0] <= 0.3 * 100_000 + 1e-6
+    assert infected_total[1] <= 0.5 * 400_000 + 1e-6
+
+
+def test_age_calibration_per_group_scale_recovers_fit():
+    model = get_model("age")
+    template = _age_params([0.0, 0.0], [0.0] * 4)
+    truth = template.with_values([0.4, 0.3], [2.0, 0.5, 0.8, 1.2])
+    observed = model_observable(model, truth, 16)
+    groups = observed.reshape(2, -1)
+    scale = [1.0 / groups[0].max(), 1.0 / groups[1].max()]
+    result = calibrate(model, observed, template, method="annealing", observation_scale=scale, beta_upper=5.0, random_seed=0)
+    fit = model_observable(model, result.best_params, 16).reshape(2, -1)
+    assert r2_score_np(groups[0], fit[0]) > 0.98
+    assert r2_score_np(groups[1], fit[1]) > 0.98
 
 
 def test_unknown_model_kind():

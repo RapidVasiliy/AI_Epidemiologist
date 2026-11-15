@@ -252,7 +252,7 @@ def _add_run_all_command(subparsers: argparse._SubParsersAction[argparse.Argumen
 
 
 def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("модель Барояна–Рвачёва")
+    group = parser.add_argument_group("модель Барояна–Рвачёва и возрастные группы")
     group.add_argument("--mechanistic-wave", action="store_true", help="Включить этап модели Барояна–Рвачёва (фаза волны, пик, сопоставление с ML).")
     group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
     group.add_argument("--br-epsilon", type=float, default=1.0, help="Масштаб ABC-ядра (в случаях на 10 тыс.). По умолчанию: %(default)s.")
@@ -263,6 +263,8 @@ def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--br-draws", type=int, default=500, help="MCMC/SMC: число сохраняемых итераций.")
     group.add_argument("--br-chains", type=int, default=4, help="MCMC/SMC: число цепей.")
     group.add_argument("--br-seed", type=int, default=42, help="Random seed калибровки.")
+    group.add_argument("--br-age-groups", action="store_true", help="Дополнительно калибровать возрастную модель БР (0–14 / 15+).")
+    group.add_argument("--age-forecast", action="store_true", help="ML-прогноз по возрастным группам 0–14 / 15+ (отдельная HGB-модель на группу).")
 
 
 def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
@@ -276,6 +278,7 @@ def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
         draws=args.br_draws,
         chains=args.br_chains,
         random_seed=args.br_seed,
+        age_groups=bool(args.br_age_groups),
     )
 
 
@@ -435,6 +438,7 @@ def _cmd_run_analysis_source(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     source = AnalysisSourceConfig(
         city=args.city,
@@ -472,6 +476,7 @@ def _cmd_run_analysis_tables(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     no_weather = weather_weekly is None and hourly_weather is None and bool(args.no_weather_required)
     result = run_analysis_pipeline(
@@ -515,6 +520,7 @@ def _cmd_run_all(args: argparse.Namespace) -> int:
     analysis_settings = AnalysisPipelineSettings(
         require_weather=not bool(args.no_weather),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     extra: dict[str, Any] = {"mechanistic_wave_config": _mechanistic_config(args)}
     if args.no_weather:
@@ -559,6 +565,7 @@ def _cmd_run_analysis_local(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     result = run_analysis_pipeline(
         influenza_weekly=influenza_weekly,
@@ -603,6 +610,7 @@ def _cmd_run_all_local(args: argparse.Namespace) -> int:
         analysis_settings=AnalysisPipelineSettings(
             require_weather=weather_weekly is not None,
             run_mechanistic_wave=bool(args.mechanistic_wave),
+            run_age_group_forecast=bool(args.age_forecast),
         ),
         extra_analysis_kwargs=extra,
     )

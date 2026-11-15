@@ -296,6 +296,7 @@ def make_default_render_settings(*, include_assets: bool = True) -> RenderSettin
             SectionRenderSpec(section_id="age_group_season_overview", mode="paragraphs"),
             SectionRenderSpec(section_id="forecast_risks", mode="paragraphs"),
             SectionRenderSpec(section_id="mechanistic_wave", mode="paragraphs"),
+            SectionRenderSpec(section_id="age_group_forecast", mode="paragraphs"),
             SectionRenderSpec(section_id="shap_interpretation", mode="paragraphs"),
             SectionRenderSpec(section_id="model_quality", mode="paragraphs"),
             SectionRenderSpec(section_id="model_description", mode="paragraphs"),

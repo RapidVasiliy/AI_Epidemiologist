@@ -33,12 +33,15 @@ class ModelParams:
     :param beta: интенсивности передачи (1 для total, 4 = матрица 2×2 для age)
     :param population_size: эффективная численность популяции rho
     :param initial_infectious: начальное число инфицированных (по группам)
+    :param group_population_sizes: эффективные численности групп rho_j
+        (только для возрастной модели; их сумма должна равняться rho)
     """
 
     alpha: Sequence[float]
     beta: Sequence[float]
     population_size: int
     initial_infectious: Sequence[float] = field(default_factory=lambda: [100.0])
+    group_population_sizes: Sequence[float] | None = None
 
     def with_values(self, alpha: Sequence[float], beta: Sequence[float]) -> ModelParams:
         return replace(self, alpha=list(map(float, alpha)), beta=list(map(float, beta)))
@@ -121,17 +124,23 @@ class TotalBRModel(BaroyanRvachevModel):
 
 
 class AgeGroupBRModel(BaroyanRvachevModel):
-    """Две возрастные группы (0–14, 15+), перенос из Influenza_bulletin как есть.
+    """Модель Барояна–Рвачёва для двух возрастных групп (0–14 и 15+ лет).
 
-    Внимание (известные ограничения исходной реализации, сохранены намеренно,
-    чтобы не менять ранее полученные результаты):
+    Для группы j (0 — дети, 1 — взрослые)::
 
-    * обе группы стартуют с ``S_0 = alpha_j * rho`` от полной популяции;
-    * в слагаемом ``sum_i beta[2i+j] S^j I / rho`` используется ``I`` своей же
-      группы ``j``, поэтому межгрупповой передачи фактически нет и
-      ``beta[j]`` и ``beta[2+j]`` неразличимы.
+        rho_j   = kappa * N_j,   rho = rho_0 + rho_1,   S^j_0 = floor(alpha_j * rho_j)
+        I^j_t   = min( sum_tau j^j_{t-tau} g_tau , rho_j )
+        j^j_{t+1} = min( S^j_t * sum_i B[j, i] * I^i_t / rho , S^j_t )
 
-    В бюллетене используется только ``TotalBRModel``.
+    ``beta`` задаёт матрицу контактов B построчно: ``beta[2*j + i]`` —
+    интенсивность заражения группы j от инфицированных группы i.
+
+    Если ``alpha_0 = alpha_1 = alpha`` и все элементы B равны ``beta``, сумма
+    групп совпадает с ``TotalBRModel`` (с точностью до округления S_0 вниз).
+
+    Исправляет реализацию Influenza_bulletin, где обе группы стартовали от
+    полной популяции, а сила инфекции зависела только от инфицированных той же
+    группы (межгрупповой передачи не было).
     """
 
     groups = 2
@@ -140,29 +149,28 @@ class AgeGroupBRModel(BaroyanRvachevModel):
     name = "age"
 
     def simulate(self, params: ModelParams, duration_days: int) -> SimulationResult:
-        rho = float(params.population_size)
-        out_newly, out_inf, out_s = [], [], []
-        for j in range(self.groups):
-            s0 = int(float(params.alpha[j]) * rho)
-            i0 = float(params.initial_infectious[j])
-            newly = np.zeros(duration_days)
-            infected = np.zeros(duration_days)
-            susceptible = np.zeros(duration_days)
-            newly[0] = i0
-            infected[0] = i0
-            susceptible[0] = s0
-            for day in range(duration_days - 1):
-                infected[day] = min(self._infected(newly, day), rho)
-                force = sum(
-                    float(params.beta[2 * i + j]) * susceptible[day] * infected[day] / rho
-                    for i in range(self.groups)
-                )
-                newly[day + 1] = min(force, susceptible[day])
-                susceptible[day + 1] = susceptible[day] - newly[day + 1]
-            out_newly.append(newly)
-            out_inf.append(infected)
-            out_s.append(susceptible)
-        return SimulationResult(np.vstack(out_newly), np.vstack(out_inf), np.vstack(out_s))
+        if params.group_population_sizes is None or len(params.group_population_sizes) != self.groups:
+            raise ValueError("AgeGroupBRModel требует group_population_sizes для двух групп.")
+        rho_g = np.asarray(params.group_population_sizes, dtype=float)
+        rho = float(rho_g.sum())
+        alpha = np.asarray(params.alpha, dtype=float)
+        contact = np.asarray(params.beta, dtype=float).reshape(self.groups, self.groups)
+        i0 = np.asarray(params.initial_infectious, dtype=float)
+
+        newly = np.zeros((self.groups, duration_days))
+        infected = np.zeros((self.groups, duration_days))
+        susceptible = np.zeros((self.groups, duration_days))
+        newly[:, 0] = i0
+        infected[:, 0] = i0
+        susceptible[:, 0] = np.floor(alpha * rho_g)
+
+        for day in range(duration_days - 1):
+            for j in range(self.groups):
+                infected[j, day] = min(self._infected(newly[j], day), rho_g[j])
+            force = contact @ infected[:, day] / rho
+            newly[:, day + 1] = np.minimum(susceptible[:, day] * force, susceptible[:, day])
+            susceptible[:, day + 1] = susceptible[:, day] - newly[:, day + 1]
+        return SimulationResult(newly, infected, susceptible)
 
 
 def get_model(kind: str) -> BaroyanRvachevModel:

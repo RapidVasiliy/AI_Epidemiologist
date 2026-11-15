@@ -117,6 +117,8 @@ class FeatureEngineeringConfig(StrictModel):
         "total_cases_formula",
         "rh_min",
         "rh_max",
+        # служебный флаг локальных данных (неделя без ПЦР), не признак модели
+        "pcr_imputed",
     )
     require_numeric_features: bool = True
     validate_weekly_frame: bool = True

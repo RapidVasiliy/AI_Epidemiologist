@@ -174,6 +174,7 @@ class RuntimeCheckConfig(StrictModel):
         "age_group_season_overview",
         "forecast_risks",
         "mechanistic_wave",
+        "age_group_forecast",
         "shap_interpretation",
         "model_quality",
         "model_description",

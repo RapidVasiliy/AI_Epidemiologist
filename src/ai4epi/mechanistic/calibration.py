@@ -58,7 +58,7 @@ class CalibrationResult:
     alpha_samples: np.ndarray
     beta_samples: np.ndarray
     template: ModelParams
-    observation_scale: float
+    observation_scale: float | list[float]
     epsilon: float | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -102,8 +102,10 @@ def calibrate(
     *,
     method: CalibrationMethod = "mcmc",
     time_step: TimeStep = "week",
-    observation_scale: float = 1.0,
+    observation_scale: float | Sequence[float] = 1.0,
     epsilon: float = 1.0,
+    alpha_upper: float = 1.0,
+    beta_upper: float = 1.0,
     n_samples: int = 200,
     tune: int = 2500,
     draws: int = 500,
@@ -111,11 +113,20 @@ def calibrate(
     cores: int | None = None,
     n_trials: int = 1000,
     random_seed: int | None = 42,
+    best_estimate: Literal["mean", "min_distance"] = "mean",
 ) -> CalibrationResult:
     """Откалибровать ``model`` по наблюдаемому ряду ``observed``.
 
     ``observed`` — недельные (или суточные) новые случаи в абсолютных числах;
     для модели с группами — ряды групп подряд, как в исходном коде.
+    ``observation_scale`` — число или по числу на группу (например,
+    ``10_000 / N_j``: невязка в случаях на 10 тыс. населения своей группы).
+    Априорные распределения: alpha ~ U[0, alpha_upper], beta ~ U[0, beta_upper].
+
+    ``best_estimate`` (mcmc/abc): ``"mean"`` — средние по выборке, как в статье и
+    исходном коде; ``"min_distance"`` — пара из выборки с наименьшей невязкой
+    (устойчивее при многомодальном или несошедшемся апостериорном распределении,
+    например для возрастной модели с шестью параметрами).
     """
 
     if method not in CALIBRATION_METHODS:
@@ -127,10 +138,12 @@ def calibrate(
     if len(data) % alpha_dim:
         raise CalibrationError("Длина ряда не делится на число групп модели.")
     n_steps = len(data) // alpha_dim
-    scaled = data * observation_scale
+    scale_per_group = np.broadcast_to(np.asarray(observation_scale, dtype=float), (alpha_dim,))
+    scale = np.repeat(scale_per_group, n_steps)
+    scaled = data * scale
 
     def observable(alpha: Sequence[float], beta: Sequence[float]) -> np.ndarray:
-        return model_observable(model, template.with_values(alpha, beta), n_steps, time_step=time_step) * observation_scale
+        return model_observable(model, template.with_values(alpha, beta), n_steps, time_step=time_step) * scale
 
     if method in ("mcmc", "abc"):
         alpha_s, beta_s, diagnostics = _bayesian(
@@ -140,6 +153,8 @@ def calibrate(
             beta_dim=beta_dim,
             method=method,
             epsilon=epsilon,
+            alpha_upper=alpha_upper,
+            beta_upper=beta_upper,
             n_samples=n_samples,
             tune=tune,
             draws=draws,
@@ -147,20 +162,33 @@ def calibrate(
             cores=cores,
             random_seed=random_seed,
         )
-        best = template.with_values(alpha_s.mean(axis=0), beta_s.mean(axis=0))
+        if best_estimate == "min_distance":
+            distances = [float(np.sum((observable(a, b) - scaled) ** 2)) for a, b in zip(alpha_s, beta_s, strict=True)]
+            k = int(np.argmin(distances))
+            best = template.with_values(alpha_s[k], beta_s[k])
+        else:
+            best = template.with_values(alpha_s.mean(axis=0), beta_s.mean(axis=0))
+        diagnostics["best_estimate"] = best_estimate
         return CalibrationResult(
             method=method,
             best_params=best,
             alpha_samples=alpha_s,
             beta_samples=beta_s,
             template=template,
-            observation_scale=observation_scale,
+            observation_scale=float(scale_per_group[0]) if alpha_dim == 1 else scale_per_group.tolist(),
             epsilon=epsilon,
             diagnostics=diagnostics,
         )
 
     x, score = (_optuna if method == "optuna" else _annealing)(
-        observable, scaled, alpha_dim=alpha_dim, beta_dim=beta_dim, n_trials=n_trials, random_seed=random_seed
+        observable,
+        scaled,
+        alpha_dim=alpha_dim,
+        beta_dim=beta_dim,
+        n_trials=n_trials,
+        random_seed=random_seed,
+        alpha_upper=alpha_upper,
+        beta_upper=beta_upper,
     )
     return CalibrationResult(
         method=method,
@@ -168,7 +196,7 @@ def calibrate(
         alpha_samples=np.empty((0, alpha_dim)),
         beta_samples=np.empty((0, beta_dim)),
         template=template,
-        observation_scale=observation_scale,
+        observation_scale=float(scale_per_group[0]) if alpha_dim == 1 else scale_per_group.tolist(),
         epsilon=None,
         diagnostics={"objective": "r2", "best_r2": score},
     )
@@ -182,6 +210,8 @@ def _bayesian(
     beta_dim: int,
     method: str,
     epsilon: float,
+    alpha_upper: float,
+    beta_upper: float,
     n_samples: int,
     tune: int,
     draws: int,
@@ -206,8 +236,8 @@ def _bayesian(
         return observable(np.asarray(alpha)[:alpha_dim], np.asarray(beta)[:beta_dim])
 
     with pm.Model():
-        alpha = pm.Uniform("alpha", lower=0, upper=1, shape=(alpha_dim,))
-        beta = pm.Uniform("beta", lower=0, upper=1, shape=(beta_dim,))
+        alpha = pm.Uniform("alpha", lower=0, upper=alpha_upper, shape=(alpha_dim,))
+        beta = pm.Uniform("beta", lower=0, upper=beta_upper, shape=(beta_dim,))
         # pm.Simulator требует параметров одинаковой формы: дополняем нулями,
         # как в исходном коде; лишние компоненты отбрасываются в simulator().
         alpha_in = pt.concatenate([alpha, pt.zeros(width - alpha_dim)]) if width > alpha_dim else alpha
@@ -250,7 +280,7 @@ def _bayesian(
     return a_all[idx], b_all[idx], diagnostics
 
 
-def _optuna(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed):
+def _optuna(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, alpha_upper, beta_upper):
     try:
         import optuna
     except ImportError as exc:  # pragma: no cover
@@ -258,8 +288,8 @@ def _optuna(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed):
     optuna.logging.set_verbosity(optuna.logging.ERROR)
 
     def objective(trial):
-        a = [trial.suggest_float(f"alpha_{i}", 0, 1) for i in range(alpha_dim)]
-        b = [trial.suggest_float(f"beta_{i}", 0, 1) for i in range(beta_dim)]
+        a = [trial.suggest_float(f"alpha_{i}", 0, alpha_upper) for i in range(alpha_dim)]
+        b = [trial.suggest_float(f"beta_{i}", 0, beta_upper) for i in range(beta_dim)]
         return r2_score_np(data, observable(a, b))
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=random_seed))
@@ -271,13 +301,14 @@ def _optuna(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed):
     return x, float(study.best_value)
 
 
-def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed):  # noqa: ARG001
+def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, alpha_upper, beta_upper):  # noqa: ARG001
     from scipy.optimize import dual_annealing
 
     def loss(x):
         return -r2_score_np(data, observable(x[:alpha_dim], x[alpha_dim:]))
 
-    res = dual_annealing(loss, bounds=[(0.0, 1.0)] * (alpha_dim + beta_dim), seed=random_seed)
+    bounds = [(0.0, alpha_upper)] * alpha_dim + [(0.0, beta_upper)] * beta_dim
+    res = dual_annealing(loss, bounds=bounds, seed=random_seed)
     return np.asarray(res.x, dtype=float), float(-res.fun)
 
 

@@ -155,7 +155,9 @@ The main engineering principle is separation of responsibilities:
 ├── README.md
 ├── data/regions/          # local xlsx surveillance data (spb, samara, chelyabinsk)
 ├── docs/
-│   └── mechanistic_wave.md
+│   ├── age_groups.md
+│   ├── mechanistic_wave.md
+│   └── review.md
 ├── tests/
 ├── runs/
 │   ├── latest_narrators/
@@ -164,6 +166,7 @@ The main engineering principle is separation of responsibilities:
 └── src/
     └── ai4epi/
         ├── analysis/
+        │   ├── age_group_forecast.py # ML forecast by age group
         │   ├── age_group_season.py
         │   ├── analysis_pipeline.py
         │   ├── context_builders.py
@@ -178,6 +181,7 @@ The main engineering principle is separation of responsibilities:
         │   ├── io.py
         │   └── sections.py
         ├── data/
+        │   ├── age_groups.py
         │   ├── influenza.py
         │   ├── local_excel.py
         │   └── weather.py
@@ -202,7 +206,7 @@ The main engineering principle is separation of responsibilities:
         └── cli.py
 ```
 
-The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format. (`runs/` is not included in this copy of the repository.)
+The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format. (`runs/` is not included in this repository.)
 
 ---
 
@@ -374,7 +378,7 @@ If `--end-date` is omitted, the workflow uses the latest available surveillance 
 `data/regions/<city>/{cases,pcr}.xlsx` (Saint Petersburg, Samara, Chelyabinsk, 2010 – Oct/Nov 2024) can be used without network access. Without a weather table the forecasting model is built without weather features.
 
 ```bash
-ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --output-dir runs/spb_2019w04/analysis
+ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --br-age-groups --age-forecast --output-dir runs/spb_2019w04/analysis
 ```
 
 ```bash
@@ -578,7 +582,7 @@ ai4epi run-analysis-source \
 
 ## Generated report structure
 
-The default report registry contains eight sections (two of them optional):
+The default report registry contains nine sections (three of them optional):
 
 | Section ID | Title | Purpose |
 |---|---|---|
@@ -586,7 +590,8 @@ The default report registry contains eight sections (two of them optional):
 | `epidemic_wave_comparison` | Epidemic-wave comparison | Comparison of recent epidemic waves by peak height, peak timing, width, and seasonal burden. |
 | `age_group_season_overview` | Age-group structure | Current-season age-group peak and burden analysis. |
 | `forecast_risks` | Forecast and risk assessment | Point forecast, uncertainty intervals, and risk interpretation. |
-| `mechanistic_wave` | Epidemic-wave phase (Baroyan–Rvachev) | Optional. Wave phase, expected peak and end of the main wave from the mechanistic model, and agreement with the ML forecast. Present only when the analysis ran with `--mechanistic-wave` and an epidemic rise was detected. |
+| `mechanistic_wave` | Epidemic-wave phase (Baroyan–Rvachev) | Optional. Wave phase, expected peak and end of the main wave from the mechanistic model, and agreement with the ML forecast. Present only when the analysis ran with `--mechanistic-wave` and an epidemic rise was detected. With `--br-age-groups` also covers the 0–14 / 15+ age groups. |
+| `age_group_forecast` | Forecast by age group | Optional (`--age-forecast`). ML forecast for the 0–14 and 15+ groups with intervals, skill against a naive forecast, and per-group agreement with the age-structured mechanistic model. |
 | `shap_interpretation` | Model interpretation | SHAP-based explanation of forecast drivers. |
 | `model_quality` | Model quality and limitations | Forecast metrics, error patterns, and practical constraints. |
 | `model_description` | Model description | Compact model card for the report. |
@@ -983,6 +988,10 @@ result.context.get_block("mechanistic_wave")["comparison_with_ml"]
 
 Details, defaults and differences from the original code: [docs/mechanistic_wave.md](docs/mechanistic_wave.md).
 
+Age groups (0–14 / 15+): a corrected age-structured Baroyan–Rvachev model (`--br-age-groups`) and a per-group ML forecast (`--age-forecast`), see [docs/age_groups.md](docs/age_groups.md).
+
+Known weaknesses and the improvement plan: [docs/review.md](docs/review.md).
+
 ---
 
 ## Limitations
@@ -1018,8 +1027,8 @@ Important limitations:
 
 ```bash
 python -m pip install -e ".[dev,mechanistic]"
-python -m pytest                  # all tests, ~1 min
-python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~10 s
+python -m pytest                  # all tests, ~2.5 min
+python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~20 s
 ```
 
 ---

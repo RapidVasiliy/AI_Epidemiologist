@@ -511,8 +511,29 @@ MECHANISTIC_WAVE_PROMPT = (
     "максимум — механистическая модель. Если agreement_code='disagree', напиши, что прогнозы расходятся "
     "(по направлению и/или масштабу — disagreement_reasons), что это признак повышенной неопределённости и "
     "что прогнозы не усредняются. Если diagnostics.converged=false, добавь, что оценки параметров неустойчивы. "
+    "Если age_groups не null, добавь в phase_text одно-два предложения о фазе и сроке максимума по возрастным "
+    "группам (age_groups.groups[].phase_label, peak) и о том, на сколько недель максимум у детей опережает "
+    "максимум у взрослых (children_peak_lead_weeks); не интерпретируй contact_matrix. "
     "ПРАВИЛА: используй только данные из JSON; соблюдай forbidden_claims; недельная шкала времени; "
     "не называй параметры alpha и beta, если об этом не просят данные; официальный нейтральный стиль, без списков."
+)
+
+AGE_GROUP_FORECAST_PROMPT = (
+    "Ты Narrator — автор раздела 'Прогноз по возрастным группам' в бюллетене по гриппу. "
+    "Верни JSON: {groups_forecast_text, groups_comparison_text}. "
+    "АБЗАЦ 1 (groups_forecast_text): для каждой группы из groups (age_group_label) укажи текущее значение "
+    "current_value и прогноз на 1 и 4 недели (horizons[0] и horizons[3]: point_forecast и прогнозный интервал "
+    "q_lo–q_hi), направление direction; отметь, в какой группе заболеваемость сейчас выше "
+    "(semantic.highest_current_group). Единица — случаи на 10 тыс. населения соответствующей группы; значения "
+    "разных групп относятся к разным знаменателям. "
+    "АБЗАЦ 2 (groups_comparison_text): кратко опиши качество моделей групп на проверочном периоде "
+    "(test_metrics: R², MAE, interval_coverage) и допущение assumption_note; если группа входит в "
+    "semantic.groups_not_better_than_persistence, прямо укажи, что на проверочном периоде прогноз для неё не "
+    "точнее наивного (значение текущей недели), и его следует использовать с осторожностью. Если у группы поле mechanistic "
+    "не null, сопоставь направление ML-прогноза с механистической моделью (mechanistic.comparison_with_ml."
+    "agreement); при расхождении напиши о повышенной неопределённости для этой группы, не усредняя прогнозы. "
+    "ПРАВИЛА: только данные из JSON; недельная шкала времени; без причинных выводов; термин 'прогнозный "
+    "интервал'; официальный нейтральный стиль, без списков."
 )
 
 
@@ -634,6 +655,7 @@ def default_section_configs() -> list[SectionConfig]:
                 "allowed_claims": "mechanistic_wave.allowed_claims",
                 "forbidden_claims": "mechanistic_wave.forbidden_claims",
                 "semantic": "mechanistic_wave.semantic",
+                "age_groups": "mechanistic_wave.age_groups",
             },
             metadata={
                 "expected_numbers": [
@@ -643,6 +665,35 @@ def default_section_configs() -> list[SectionConfig]:
                 "editor_field_roles": {
                     "phase_text": "абзац о фазе эпидемической волны, сроке и величине максимума по механистической модели",
                     "comparison_text": "абзац о согласии или расхождении прогнозов механистической модели и модели машинного обучения",
+                },
+            },
+        ),
+        SectionConfig(
+            section_id="age_group_forecast",
+            title="Прогноз по возрастным группам",
+            prompt=AGE_GROUP_FORECAST_PROMPT,
+            output_schema=make_text_object_schema("groups_forecast_text", "groups_comparison_text"),
+            evidence_key="age_group_forecast_context",
+            order=47,
+            max_tokens=900,
+            activation_path="age_group_forecast",
+            required=False,
+            context_mapping={
+                "metric_label_ru": "age_group_forecast.metric_label_ru",
+                "model_name_ru": "age_group_forecast.model_name_ru",
+                "assumption_note": "age_group_forecast.assumption_note",
+                "cross_group_note": "age_group_forecast.cross_group_note",
+                "groups": "age_group_forecast.groups",
+                "semantic": "age_group_forecast.semantic",
+            },
+            metadata={
+                "expected_numbers": [
+                    {"label": "прогноз на 1 неделю, первая возрастная группа", "path": "age_group_forecast.groups.0.horizons.0.point_forecast", "required": True},
+                    {"label": "прогноз на 1 неделю, вторая возрастная группа", "path": "age_group_forecast.groups.1.horizons.0.point_forecast", "required": True},
+                ],
+                "editor_field_roles": {
+                    "groups_forecast_text": "абзац с прогнозом заболеваемости по возрастным группам",
+                    "groups_comparison_text": "абзац о качестве моделей групп и согласии с механистической моделью",
                 },
             },
         ),

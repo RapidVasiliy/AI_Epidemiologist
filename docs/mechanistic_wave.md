@@ -2,6 +2,7 @@
 
 Этот документ описывает, как код `Influenza_bulletin` (vnleonenko/Influenza_bulletin, коммит
 `6f406cc`) встроен в AI4Epi, чем перенос отличается от исходного кода и что проверено.
+Возрастная модель и ML-прогноз по возрастным группам описаны в [age_groups.md](age_groups.md).
 
 ## Место в системе
 
@@ -26,7 +27,7 @@
 
 | Influenza_bulletin | AI4Epi | Комментарий |
 |---|---|---|
-| `model_complex/models/*` | `ai4epi/mechanistic/models.py` | разностная схема без изменений; совпадение проверено тестом `test_total_model_matches_legacy_loop` и сравнением на 60 случайных наборах параметров |
+| `model_complex/models/*` | `ai4epi/mechanistic/models.py` | общая модель — разностная схема без изменений (тест `test_total_model_matches_legacy_loop`); возрастная модель исправлена, см. [age_groups.md](age_groups.md) |
 | `model_complex/calibration/Algorithms/*`, `Calibration.py` | `ai4epi/mechanistic/calibration.py` | одна функция `calibrate(...)` вместо классов, возвращает `CalibrationResult` |
 | `model_complex/calibration/Forecast.py`, `plot_module/*` | `analysis/mechanistic_wave.build_trajectories`, `output/figures._plot_mechanistic_wave` | пучок траекторий → квантили 5/50/95 %, рисунок «Рис. 5» в бюллетене |
 | `model_complex/epid_data/epid_data.py` (xlsx) | `ai4epi/data/local_excel.py` | приводит xlsx к тому же контракту `cases`, что и API |
@@ -34,7 +35,7 @@
 | `data/{spb,samara,chelyabinsk}` | `data/regions/...` | — |
 | `data/samara_day` | не перенесён | это недельный ряд Самары с датами, переписанными в последовательные дни (2010-04-01 … 2012-05-13); тестовые данные для режима `day`, не реальные суточные |
 | `prediction_module/predictor.py` (перебор ε) | не перенесён | ε — параметр `MechanisticWaveConfig.epsilon` / `--br-epsilon` |
-| `get_predictions.ipynb`, `test.ipynb` | не перенесены | доступны в истории git этого репозитория (коммит с папкой `influenza_bulletin/`) |
+| `get_predictions.ipynb`, `test.ipynb` | не перенесены | исходный код целиком — в репозитории vnleonenko/Influenza_bulletin и в истории RapidVasiliy/SberAuto (коммит `23bafa0`) |
 
 ## Параметры по умолчанию (`MechanisticWaveConfig`)
 
@@ -91,9 +92,8 @@
   `parameters.alpha_at_upper_bound`.
 * **Одна волна.** Модель описывает одну волну; вторичный подъём (Челябинск, январь 2023) она не
   воспроизводит — это и есть случай «расхождения» по схеме статьи.
-* **Возрастная модель** (`AgeGroupBRModel`) перенесена как есть и в этапе не используется: обе группы
-  стартуют от полной популяции, а сила инфекции группы j зависит только от инфицированных той же группы
-  (межгрупповой передачи нет).
+* **Возрастная модель** исправлена и подключается флагом `--br-age-groups`; её ограничения — в
+  [age_groups.md](age_groups.md).
 * **Направление прогнозов** сравнивается по изменению от текущей недели к h = 4; немонотонная
   траектория (рост, затем спад) может быть классифицирована как «стабилизация».
 * **LLM-часть** с новой секцией проверена на подставном бэкенде (секция генерируется, проходит
@@ -102,7 +102,7 @@
 ## Проверки
 
 ```bash
-python -m pytest            # 31 тест, ~1 мин; -m "not slow" — 26 тестов, ~10 с
+python -m pytest            # 38 тестов, ~2.5 мин; -m "not slow" — 32 теста, ~20 с
 ```
 
 * `tests/test_mechanistic_models.py` — совпадение с исходным циклом, инварианты, калибровка на

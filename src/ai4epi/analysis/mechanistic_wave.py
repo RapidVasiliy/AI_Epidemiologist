@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from typing import Any, Literal
@@ -135,11 +136,29 @@ class MechanisticWaveConfig(StrictModel):
     agreement_relative_gap_pct: float = Field(default=50.0, gt=0.0)
     rhat_threshold: float = Field(default=1.05, gt=1.0)
     round_digits: int = Field(default=3, ge=0, le=8)
+    # --- возрастная модель (0–14 / 15+), см. AgeGroupBRModel ---------------
+    # Недоучёт различается по возрастам: дети регистрируются почти полностью
+    # (сезонная регистрируемая заболеваемость гриппом детей 0–14 в СПб — 20–30 %
+    # группы, что невозможно при kappa = 0.1), взрослые — с недоучётом порядка
+    # десяти раз (Leonenko, Bobashev, 2019).
+    age_groups: bool = False
+    age_underreporting_kappa: tuple[float, float] = (1.0, 0.1)
+    age_initial_infectious: tuple[float, float] = (50.0, 50.0)
+    # "group_peak": невязка каждой группы нормируется на её наблюдаемый максимум
+    # (группы весят одинаково, epsilon — относительная ошибка);
+    # "per_10k": на 10 тыс. населения группы (детская группа доминирует).
+    age_residual_scale: Literal["group_peak", "per_10k"] = "group_peak"
+    age_epsilon: float = Field(default=0.05, gt=0.0)
+    age_beta_upper: float = Field(default=10.0, gt=0.0)
+    age_tune: int = Field(default=5000, ge=0)
+    age_draws: int = Field(default=2000, ge=10)
+    age_best_estimate: Literal["mean", "min_distance"] = "min_distance"
 
 
 class MechanisticWaveOutputConfig(StrictModel):
     output_dir: Path = Path("mechanistic_wave")
     trajectories_filename: str = "trajectories.csv"
+    age_trajectories_filename: str = "trajectories_age.csv"
     samples_filename: str = "posterior_samples.csv"
     summary_filename: str = "mechanistic_wave.json"
 
@@ -150,10 +169,12 @@ class MechanisticWaveRunResult(StrictModel):
     context_block: JsonObject | None = None
     trajectories: Any | None = None
     calibration: Any | None = None
+    age_trajectories: Any | None = None
+    age_calibration: Any | None = None
     artifacts: dict[str, Path] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
 
-    @field_validator("trajectories")
+    @field_validator("trajectories", "age_trajectories")
     @classmethod
     def _df(cls, value: Any) -> Any:
         if value is not None and not isinstance(value, pd.DataFrame):
@@ -182,6 +203,9 @@ def run_mechanistic_wave_analysis(
     ml_forecast: JsonObject | None = None,
     config: MechanisticWaveConfig | None = None,
     output: MechanisticWaveOutputConfig | None = None,
+    age_group_weekly: Mapping[str, pd.DataFrame] | None = None,
+    age_group_labels: Mapping[str, str] | None = None,
+    age_ml_forecasts: Mapping[str, JsonObject] | None = None,
 ) -> MechanisticWaveRunResult:
     """Выполнить механистический этап.
 
@@ -191,6 +215,9 @@ def run_mechanistic_wave_analysis(
         последняя неделя таблицы); совпадает с ``origin`` ML-прогноза
     :param ml_forecast: ``{"point": [...], "lo": [...], "hi": [...], "dates": [...]}``
         для сопоставления с ML-прогнозом; без него блок сопоставления пуст
+    :param age_group_weekly: ряды двух возрастных групп (``ai4epi.data.age_groups``)
+        для возрастной модели (при ``config.age_groups=True``)
+    :param age_ml_forecasts: ML-прогнозы по группам в том же формате, что ``ml_forecast``
     """
 
     cfg = config or MechanisticWaveConfig()
@@ -280,11 +307,32 @@ def run_mechanistic_wave_analysis(
             f"В калибровочном интервале {imputed_weeks} нед. без данных ПЦР; доля положительных проб на них интерполирована."
         )
     block["pcr_imputed_weeks"] = imputed_weeks
+
+    block["age_groups"] = None
+    age_traj: pd.DataFrame | None = None
+    age_cal: CalibrationResult | None = None
+    if cfg.age_groups:
+        if not age_group_weekly or len(age_group_weekly) != 2:
+            warnings.append("Возрастная модель БР не запущена: не переданы ряды двух возрастных групп.")
+        else:
+            age_block, age_traj, age_cal, age_warnings = run_age_group_mechanistic(
+                age_group_weekly,
+                calibration_start=calib_start,
+                origin=origin,
+                labels=age_group_labels or {},
+                ml_forecasts=age_ml_forecasts or {},
+                config=cfg,
+            )
+            block["age_groups"] = age_block
+            warnings.extend(f"возрастная модель: {w}" for w in age_warnings)
+
     result = MechanisticWaveRunResult(
         status="ok",
         context_block=block,
         trajectories=trajectories,
         calibration=calibration,
+        age_trajectories=age_traj,
+        age_calibration=age_cal,
         warnings=warnings,
     )
     if output is not None:
@@ -381,108 +429,15 @@ def build_mechanistic_wave_context(
     observed = window["inc_per_10k"].to_numpy(float)
 
     fit_r2 = r2_score_np(observed, best[:n_obs])
-
-    peak_idx = int(np.argmax(best))
-    end_idx = _wave_end_index(best, peak_idx, cfg.wave_end_fraction)
-    phase = _phase(last_idx, peak_idx, end_idx, cfg.peak_tolerance_weeks)
-
-    peak_block: JsonObject = {
-        "date": dates.iloc[peak_idx].date().isoformat(),
-        "iso_week": int(dates.iloc[peak_idx].isocalendar().week),
-        "value": round(float(best[peak_idx]), rd),
-        "weeks_from_current": int(peak_idx - last_idx),
-        "already_passed": bool(peak_idx < last_idx - cfg.peak_tolerance_weeks),
-        "range": None,
-    }
-    if bundle is not None:
-        pk_idx = np.argmax(bundle, axis=1)
-        pk_val = bundle[np.arange(len(bundle)), pk_idx]
-        lo_i, hi_i = np.percentile(pk_idx, [5, 95]).round().astype(int)
-        peak_block["range"] = {
-            "date_low": dates.iloc[int(lo_i)].date().isoformat(),
-            "date_high": dates.iloc[int(hi_i)].date().isoformat(),
-            "iso_week_low": int(dates.iloc[int(lo_i)].isocalendar().week),
-            "iso_week_high": int(dates.iloc[int(hi_i)].isocalendar().week),
-            "value_low": round(float(np.percentile(pk_val, 5)), rd),
-            "value_high": round(float(np.percentile(pk_val, 95)), rd),
-            "coverage": "5–95% пучка траекторий",
-        }
-
-    wave_end: JsonObject = {
-        "definition": f"первая неделя после максимума, на которой центральная траектория ниже {int(cfg.wave_end_fraction * 100)}% от максимума",
-        "within_projection": end_idx is not None,
-        "date": dates.iloc[end_idx].date().isoformat() if end_idx is not None else None,
-        "iso_week": int(dates.iloc[end_idx].isocalendar().week) if end_idx is not None else None,
-        "weeks_from_current": int(end_idx - last_idx) if end_idx is not None else None,
-    }
-
+    q05 = trajectories["q05"].to_numpy(float) if "q05" in trajectories else None
+    q95 = trajectories["q95"].to_numpy(float) if "q95" in trajectories else None
+    phase, peak_block, wave_end = summarize_wave(best, bundle, dates, last_idx, cfg)
     current_value = float(observed[-1])
-    horizons: list[JsonObject] = []
-    h = cfg.forecast_horizon_weeks
-    for k in range(1, h + 1):
-        idx = last_idx + k
-        row: JsonObject = {
-            "horizon_weeks": k,
-            "target_date": dates.iloc[idx].date().isoformat(),
-            "target_iso_week": int(dates.iloc[idx].isocalendar().week),
-            "br_value": round(float(best[idx]), rd),
-            "br_low": round(float(trajectories["q05"].iloc[idx]), rd) if "q05" in trajectories else None,
-            "br_high": round(float(trajectories["q95"].iloc[idx]), rd) if "q95" in trajectories else None,
-            "ml_value": None,
-            "ml_low": None,
-            "ml_high": None,
-        }
-        if ml_forecast and k <= len(ml_forecast.get("point", [])):
-            row["ml_value"] = round(float(ml_forecast["point"][k - 1]), rd)
-            row["ml_low"] = round(float(min(ml_forecast["lo"][k - 1], ml_forecast["hi"][k - 1])), rd)
-            row["ml_high"] = round(float(max(ml_forecast["lo"][k - 1], ml_forecast["hi"][k - 1])), rd)
-            ml_dates = list(ml_forecast.get("dates") or [])
-            ml_date = ml_dates[k - 1] if k <= len(ml_dates) else None
-            if ml_date and ml_date != row["target_date"]:
-                warnings.append(f"Даты горизонта h={k} у ML ({ml_date}) и модели БР ({row['target_date']}) не совпадают.")
-        horizons.append(row)
-
-    br_h = float(best[last_idx + h])
-    br_dir = _direction(current_value, br_h, cfg.direction_change_pct_threshold)
-    comparison: JsonObject = {
-        "current_value": round(current_value, rd),
-        "br_direction_code": br_dir,
-        "br_direction": DIRECTION_LABELS_RU[br_dir],
-        "br_change_pct": round(_pct(current_value, br_h), 1),
-        "ml_direction_code": None,
-        "ml_direction": None,
-        "ml_change_pct": None,
-        "mean_relative_gap_pct": None,
-        "agreement_code": None,
-        "agreement": None,
-        "disagreement_reasons": [],
-    }
-    if all(r["ml_value"] is not None for r in horizons):
-        ml_h = float(horizons[-1]["ml_value"])
-        ml_dir = _direction(current_value, ml_h, cfg.direction_change_pct_threshold)
-        gaps = [
-            abs(r["br_value"] - r["ml_value"]) / max(abs(r["ml_value"]), 1e-9) * 100.0 for r in horizons
-        ]
-        gap = float(np.mean(gaps))
-        reasons = []
-        if ml_dir != br_dir:
-            reasons.append("direction")
-        if gap > cfg.agreement_relative_gap_pct:
-            reasons.append("scale")
-        code = "agree" if not reasons else "disagree"
-        comparison.update(
-            {
-                "ml_direction_code": ml_dir,
-                "ml_direction": DIRECTION_LABELS_RU[ml_dir],
-                "ml_change_pct": round(_pct(current_value, ml_h), 1),
-                "mean_relative_gap_pct": round(gap, 1),
-                "agreement_code": code,
-                "agreement": AGREEMENT_LABELS_RU[code],
-                "disagreement_reasons": reasons,
-            }
-        )
-    else:
-        warnings.append("ML-прогноз не передан; сопоставление моделей не выполнено.")
+    horizons, comparison, cmp_warnings = compare_with_ml(
+        current_value, best, q05, q95, dates, last_idx, ml_forecast, cfg
+    )
+    warnings.extend(cmp_warnings)
+    br_dir = comparison["br_direction_code"]
 
     diag = calibration.diagnostics
     rhat = diag.get("r_hat_max")
@@ -550,6 +505,280 @@ def build_mechanistic_wave_context(
     return block, warnings
 
 
+def summarize_wave(
+    best: np.ndarray,
+    bundle: np.ndarray | None,
+    dates: pd.Series,
+    last_idx: int,
+    cfg: MechanisticWaveConfig,
+) -> tuple[PhaseCode, JsonObject, JsonObject]:
+    """Фаза волны, максимум (с диапазоном по пучку) и завершение основной волны."""
+
+    rd = cfg.round_digits
+    dates = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    peak_idx = int(np.argmax(best))
+    end_idx = _wave_end_index(best, peak_idx, cfg.wave_end_fraction)
+    phase = _phase(last_idx, peak_idx, end_idx, cfg.peak_tolerance_weeks)
+    peak_block: JsonObject = {
+        "date": dates.iloc[peak_idx].date().isoformat(),
+        "iso_week": int(dates.iloc[peak_idx].isocalendar().week),
+        "value": round(float(best[peak_idx]), rd),
+        "weeks_from_current": int(peak_idx - last_idx),
+        "already_passed": bool(peak_idx < last_idx - cfg.peak_tolerance_weeks),
+        "range": None,
+    }
+    if bundle is not None:
+        pk_idx = np.argmax(bundle, axis=1)
+        pk_val = bundle[np.arange(len(bundle)), pk_idx]
+        lo_i, hi_i = np.percentile(pk_idx, [5, 95]).round().astype(int)
+        peak_block["range"] = {
+            "date_low": dates.iloc[int(lo_i)].date().isoformat(),
+            "date_high": dates.iloc[int(hi_i)].date().isoformat(),
+            "iso_week_low": int(dates.iloc[int(lo_i)].isocalendar().week),
+            "iso_week_high": int(dates.iloc[int(hi_i)].isocalendar().week),
+            "value_low": round(float(np.percentile(pk_val, 5)), rd),
+            "value_high": round(float(np.percentile(pk_val, 95)), rd),
+            "coverage": "5–95% пучка траекторий",
+        }
+    wave_end: JsonObject = {
+        "definition": (
+            "первая неделя после максимума, на которой центральная траектория ниже "
+            f"{int(cfg.wave_end_fraction * 100)}% от максимума"
+        ),
+        "within_projection": end_idx is not None,
+        "date": dates.iloc[end_idx].date().isoformat() if end_idx is not None else None,
+        "iso_week": int(dates.iloc[end_idx].isocalendar().week) if end_idx is not None else None,
+        "weeks_from_current": int(end_idx - last_idx) if end_idx is not None else None,
+    }
+    return phase, peak_block, wave_end
+
+
+def compare_with_ml(
+    current_value: float,
+    best: np.ndarray,
+    q05: np.ndarray | None,
+    q95: np.ndarray | None,
+    dates: pd.Series,
+    last_idx: int,
+    ml_forecast: JsonObject | None,
+    cfg: MechanisticWaveConfig,
+) -> tuple[list[JsonObject], JsonObject, list[str]]:
+    """Значения модели БР и ML на горизонтах 1..h и код согласия (шаг 5 схемы)."""
+
+    rd = cfg.round_digits
+    dates = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    warnings: list[str] = []
+    horizons: list[JsonObject] = []
+    h = cfg.forecast_horizon_weeks
+    for k in range(1, h + 1):
+        idx = last_idx + k
+        row: JsonObject = {
+            "horizon_weeks": k,
+            "target_date": dates.iloc[idx].date().isoformat(),
+            "target_iso_week": int(dates.iloc[idx].isocalendar().week),
+            "br_value": round(float(best[idx]), rd),
+            "br_low": round(float(q05[idx]), rd) if q05 is not None else None,
+            "br_high": round(float(q95[idx]), rd) if q95 is not None else None,
+            "ml_value": None,
+            "ml_low": None,
+            "ml_high": None,
+        }
+        if ml_forecast and k <= len(ml_forecast.get("point", [])):
+            row["ml_value"] = round(float(ml_forecast["point"][k - 1]), rd)
+            row["ml_low"] = round(float(min(ml_forecast["lo"][k - 1], ml_forecast["hi"][k - 1])), rd)
+            row["ml_high"] = round(float(max(ml_forecast["lo"][k - 1], ml_forecast["hi"][k - 1])), rd)
+            ml_dates = list(ml_forecast.get("dates") or [])
+            ml_date = ml_dates[k - 1] if k <= len(ml_dates) else None
+            if ml_date and ml_date != row["target_date"]:
+                warnings.append(f"Даты горизонта h={k} у ML ({ml_date}) и модели БР ({row['target_date']}) не совпадают.")
+        horizons.append(row)
+
+    br_h = float(best[last_idx + h])
+    br_dir = _direction(current_value, br_h, cfg.direction_change_pct_threshold)
+    comparison: JsonObject = {
+        "current_value": round(current_value, rd),
+        "br_direction_code": br_dir,
+        "br_direction": DIRECTION_LABELS_RU[br_dir],
+        "br_change_pct": round(_pct(current_value, br_h), 1),
+        "ml_direction_code": None,
+        "ml_direction": None,
+        "ml_change_pct": None,
+        "mean_relative_gap_pct": None,
+        "agreement_code": None,
+        "agreement": None,
+        "disagreement_reasons": [],
+    }
+    if all(r["ml_value"] is not None for r in horizons):
+        ml_h = float(horizons[-1]["ml_value"])
+        ml_dir = _direction(current_value, ml_h, cfg.direction_change_pct_threshold)
+        gap = float(np.mean([abs(r["br_value"] - r["ml_value"]) / max(abs(r["ml_value"]), 1e-9) * 100.0 for r in horizons]))
+        reasons = []
+        if ml_dir != br_dir:
+            reasons.append("direction")
+        if gap > cfg.agreement_relative_gap_pct:
+            reasons.append("scale")
+        code = "agree" if not reasons else "disagree"
+        comparison.update(
+            {
+                "ml_direction_code": ml_dir,
+                "ml_direction": DIRECTION_LABELS_RU[ml_dir],
+                "ml_change_pct": round(_pct(current_value, ml_h), 1),
+                "mean_relative_gap_pct": round(gap, 1),
+                "agreement_code": code,
+                "agreement": AGREEMENT_LABELS_RU[code],
+                "disagreement_reasons": reasons,
+            }
+        )
+    else:
+        warnings.append("ML-прогноз не передан; сопоставление моделей не выполнено.")
+    return horizons, comparison, warnings
+
+
+def run_age_group_mechanistic(
+    age_group_weekly: Mapping[str, pd.DataFrame],
+    *,
+    calibration_start: pd.Timestamp,
+    origin: pd.Timestamp,
+    labels: Mapping[str, str],
+    ml_forecasts: Mapping[str, JsonObject],
+    config: MechanisticWaveConfig,
+) -> tuple[JsonObject | None, pd.DataFrame | None, CalibrationResult | None, list[str]]:
+    """Калибровка возрастной модели БР (0–14 / 15+) и сводка по каждой группе.
+
+    Группы берутся в порядке словаря: первая — дети, вторая — взрослые.
+    """
+
+    cfg = config
+    rd = cfg.round_digits
+    warnings: list[str] = []
+    codes = list(age_group_weekly)
+    frames = []
+    for code in codes:
+        f = _prepare_frame(age_group_weekly[code], origin)
+        frames.append(f[f["datetime"] >= calibration_start].reset_index(drop=True))
+    if len({len(f) for f in frames}) != 1 or not all((frames[0]["datetime"] == f["datetime"]).all() for f in frames):
+        warnings.append("ряды возрастных групп не совпадают по неделям; калибровка пропущена.")
+        return None, None, None, warnings
+    if len(frames[0]) < cfg.min_calibration_weeks:
+        warnings.append("недостаточно недель для калибровки возрастной модели.")
+        return None, None, None, warnings
+
+    observed = np.concatenate([f["total_cases_formula"].to_numpy(float) for f in frames])
+    populations = [float(f["total_population"].iloc[0]) for f in frames]
+    rho_g = [k * n for k, n in zip(cfg.age_underreporting_kappa, populations, strict=True)]
+    if cfg.age_residual_scale == "group_peak":
+        scale = [1.0 / max(float(f["total_cases_formula"].max()), 1.0) for f in frames]
+    else:
+        scale = [10_000.0 / n for n in populations]
+    model = get_model("age")
+    template = ModelParams(
+        alpha=[0.0, 0.0],
+        beta=[0.0] * 4,
+        population_size=int(sum(rho_g)),
+        initial_infectious=list(cfg.age_initial_infectious),
+        group_population_sizes=rho_g,
+    )
+    calibration = calibrate(
+        model,
+        observed,
+        template,
+        method=cfg.method,
+        observation_scale=scale,
+        epsilon=cfg.age_epsilon,
+        beta_upper=cfg.age_beta_upper,
+        n_samples=cfg.n_trajectories,
+        tune=cfg.age_tune,
+        draws=cfg.age_draws,
+        chains=cfg.chains,
+        cores=cfg.cores,
+        n_trials=cfg.n_trials,
+        random_seed=cfg.random_seed,
+        best_estimate=cfg.age_best_estimate,
+    )
+
+    n_obs = len(frames[0])
+    n_total = n_obs + cfg.projection_weeks
+    last_idx = n_obs - 1
+    per_10k = np.array([10_000.0 / n for n in populations])[:, None]
+    best = model_observable(model, calibration.best_params, n_total).reshape(2, -1) * per_10k
+    bundle = None
+    if calibration.has_bundle:
+        bundle = np.stack(
+            [model_observable(model, p, n_total).reshape(2, -1) * per_10k for p in calibration.sample_params()]
+        )  # (n, groups, weeks)
+    dates = pd.Series(pd.date_range(frames[0]["datetime"].iloc[0], periods=n_total, freq="7D"))
+
+    rows = []
+    groups_out: list[JsonObject] = []
+    for g, code in enumerate(codes):
+        obs_g = frames[g]["inc_per_10k"].to_numpy(float)
+        bundle_g = bundle[:, g, :] if bundle is not None else None
+        q05 = np.percentile(bundle_g, 5, axis=0) if bundle_g is not None else None
+        q95 = np.percentile(bundle_g, 95, axis=0) if bundle_g is not None else None
+        phase, peak, wave_end = summarize_wave(best[g], bundle_g, dates, last_idx, cfg)
+        horizons, comparison, cmp_w = compare_with_ml(
+            float(obs_g[-1]), best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg
+        )
+        warnings.extend(f"{code}: {w}" for w in cmp_w if "не передан" not in w)
+        groups_out.append(
+            {
+                "age_group_code": code,
+                "age_group_label": labels.get(code, code),
+                "fit_r2_in_sample": round(float(r2_score_np(obs_g, best[g][:n_obs])), 3),
+                "phase_code": phase,
+                "phase_label": PHASE_LABELS_RU[phase],
+                "peak": peak,
+                "wave_end": wave_end,
+                "horizons": horizons,
+                "comparison_with_ml": comparison,
+            }
+        )
+        rows.append(
+            pd.DataFrame(
+                {
+                    "datetime": dates,
+                    "age_group_code": code,
+                    "is_projection": np.arange(n_total) >= n_obs,
+                    "observed": np.concatenate([obs_g, np.full(cfg.projection_weeks, np.nan)]),
+                    "best": best[g],
+                    "q05": q05 if q05 is not None else np.nan,
+                    "q95": q95 if q95 is not None else np.nan,
+                }
+            )
+        )
+
+    peak_dates = [pd.Timestamp(gr["peak"]["date"]) for gr in groups_out]
+    lead_weeks = int((peak_dates[1] - peak_dates[0]).days // 7)
+    diag = calibration.diagnostics
+    rhat = diag.get("r_hat_max")
+    converged = None if rhat is None else bool(rhat <= cfg.rhat_threshold)
+    if converged is False:
+        warnings.append(f"MCMC: R-hat = {rhat:.2f} > {cfg.rhat_threshold}; оценки матрицы контактов ненадёжны.")
+    contact = np.asarray(calibration.best_params.beta, dtype=float).reshape(2, 2)
+    block: JsonObject = {
+        "model_name_ru": "возрастная модель Барояна–Рвачёва (0–14 и 15+ лет)",
+        "groups": groups_out,
+        "children_peak_lead_weeks": lead_weeks,
+        "children_peak_lead_note": "положительное значение — максимум у детей наступает раньше, чем у взрослых",
+        "underreporting_kappa": list(cfg.age_underreporting_kappa),
+        "alpha": [round(float(a), rd + 1) for a in calibration.best_params.alpha],
+        "contact_matrix": [[round(float(v), rd) for v in row] for row in contact],
+        "contact_matrix_note": (
+            "строка — заражаемая группа, столбец — источник; матрица плохо идентифицируема по двум недельным "
+            "рядам, интерпретировать стоит фазы и максимумы групп, а не отдельные коэффициенты"
+        ),
+        "residual_scale": cfg.age_residual_scale,
+        "diagnostics": {"r_hat_max": rhat, "ess_bulk_min": diag.get("ess_bulk_min"), "converged": converged},
+        "semantic": {
+            "phase_codes": {gr["age_group_code"]: gr["phase_code"] for gr in groups_out},
+            "agreement_codes": {gr["age_group_code"]: gr["comparison_with_ml"]["agreement_code"] for gr in groups_out},
+            "children_peak_lead_weeks": lead_weeks,
+            "converged": converged,
+        },
+    }
+    return block, pd.concat(rows, ignore_index=True), calibration, warnings
+
+
 def save_mechanistic_wave_artifacts(result: MechanisticWaveRunResult, output: MechanisticWaveOutputConfig) -> dict[str, Path]:
     out = Path(output.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -557,6 +786,10 @@ def save_mechanistic_wave_artifacts(result: MechanisticWaveRunResult, output: Me
     if result.trajectories is not None:
         artifacts["trajectories_csv"] = write_table(
             result.trajectories, out / output.trajectories_filename, options=TableWriteOptions(index=False)
+        )
+    if result.age_trajectories is not None:
+        artifacts["age_trajectories_csv"] = write_table(
+            result.age_trajectories, out / output.age_trajectories_filename, options=TableWriteOptions(index=False)
         )
     cal = result.calibration
     if isinstance(cal, CalibrationResult) and cal.has_bundle:
@@ -651,7 +884,10 @@ __all__ = [
     "MechanisticWaveRunResult",
     "build_mechanistic_wave_context",
     "build_trajectories",
+    "compare_with_ml",
     "detect_wave",
     "ml_forecast_from_result",
+    "run_age_group_mechanistic",
     "run_mechanistic_wave_analysis",
+    "summarize_wave",
 ]
