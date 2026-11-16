@@ -141,6 +141,11 @@ class MechanisticWaveConfig(StrictModel):
     calibration_start_date: date | None = None
     wave_threshold_per_10k: float = Field(default=1.0, ge=0.0)
     wave_min_growth_weeks: int = Field(default=3, ge=1)
+    # Если по исходному ряду начало волны не найдено, правило повторяется по скользящему
+    # среднему за столько прошедших недель (0/1 — не повторять). Нужен для шумных рядов, где
+    # при малом числе проб ПЦР посреди подъёма бывают нулевые недели (Новосибирск и
+    # Челябинск 2017/18: подъём до 40–60 на 10 тыс., но «3 недели роста подряд» не набирается).
+    wave_smoothing_fallback_weeks: int = Field(default=3, ge=0, le=8)
     min_calibration_weeks: int = Field(default=5, ge=3)
     underreporting_kappa: float = Field(default=0.1, gt=0.0, le=1.0)
     initial_infectious: float = Field(default=100.0, gt=0.0)
@@ -316,9 +321,13 @@ def run_mechanistic_wave_analysis(
     season_label = f"{season_year}–{season_year + 1}"
     season = frame[frame["datetime"] >= season_start].reset_index(drop=True)
 
-    wave_detected, onset_date = detect_wave(
-        _holiday_interpolated(season["inc_per_10k"].to_numpy(float), season["datetime"], cfg), season["datetime"], cfg
-    )
+    season_values = _holiday_interpolated(season["inc_per_10k"].to_numpy(float), season["datetime"], cfg)
+    wave_detected, onset_date = detect_wave(season_values, season["datetime"], cfg)
+    onset_smoothed = False
+    if not wave_detected and cfg.wave_smoothing_fallback_weeks > 1:
+        smoothed = pd.Series(season_values).rolling(cfg.wave_smoothing_fallback_weeks, min_periods=1).mean().to_numpy()
+        wave_detected, onset_date = detect_wave(smoothed, season["datetime"], cfg)
+        onset_smoothed = wave_detected
     if not wave_detected:
         return MechanisticWaveRunResult(
             status="no_wave",
@@ -405,6 +414,12 @@ def run_mechanistic_wave_analysis(
             f"В калибровочном интервале {imputed_weeks} нед. без данных ПЦР; доля положительных проб на них интерполирована."
         )
     block["pcr_imputed_weeks"] = imputed_weeks
+    block["wave_onset_smoothed"] = onset_smoothed
+    if onset_smoothed:
+        warnings.append(
+            f"Начало волны найдено по скользящему среднему за {cfg.wave_smoothing_fallback_weeks} нед.: исходный ряд "
+            "слишком шумный (вероятно, мало проб ПЦР)."
+        )
 
     block["age_groups"] = None
     age_traj: pd.DataFrame | None = None

@@ -177,3 +177,20 @@ def test_nuts_calibration_on_synthetic_wave(synthetic_weekly):
     assert res.status == "ok" and block["method"] == "nuts"
     assert block["fit_r2_in_sample"] > 0.95
     assert block["diagnostics"]["r_hat_max"] < 1.1
+
+
+def test_wave_onset_fallback_on_noisy_series(synthetic_weekly):
+    weekly = synthetic_weekly(lead_weeks=6, wave_weeks=30)
+    noisy = weekly.copy()
+    # нулевые недели посреди подъёма (мало проб ПЦР): «3 недели роста подряд» не набирается
+    rising = noisy.index[(noisy["inc_per_10k"] > 1) & (noisy.index < noisy["inc_per_10k"].idxmax())]
+    zero = rising[::2]
+    noisy.loc[zero, ["total_cases_formula", "inc_per_10k"]] = 0.0
+    origin = noisy["datetime"].iloc[noisy["inc_per_10k"].idxmax() + 2]
+    strict = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=FAST.model_copy(update={"wave_smoothing_fallback_weeks": 0}))
+    assert strict.status == "no_wave"
+    res = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=FAST.model_copy(update={"br_band": "model"}))
+    assert res.status == "ok" and res.context_block["wave_onset_smoothed"] is True
+    assert any("скользящему среднему" in w for w in res.warnings)
+    clean = run_mechanistic_wave_analysis(weekly, origin_date=origin, config=FAST.model_copy(update={"br_band": "model"}))
+    assert clean.context_block["wave_onset_smoothed"] is False
