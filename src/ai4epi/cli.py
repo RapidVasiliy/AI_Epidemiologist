@@ -265,7 +265,7 @@ def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--br-chains", type=int, default=4, help="MCMC/SMC: число цепей.")
     group.add_argument("--br-seed", type=int, default=42, help="Random seed калибровки.")
     group.add_argument("--br-age-groups", action="store_true", help="Дополнительно калибровать возрастную модель БР (0–14 / 15+).")
-    group.add_argument("--br-age-contacts", choices=("matrix", "free"), default="matrix", help="Возрастная модель: внешняя матрица контактов с одним масштабом или 4 свободных коэффициента.")
+    group.add_argument("--br-age-contacts", choices=("matrix", "free", "fine_5y", "authors_3g"), default="fine_5y", help="Возрастная модель: матрица 2×2 RSCF; 4 свободных коэффициента; сила инфекции по 5-летним группам или по матрице 0–6/7–14/15+ авторов (Ajelli & Litvinova).")
     group.add_argument("--br-bootstrap-replicates", type=int, default=100, help="Число бутстреп-реплик (--br-method bootstrap).")
     group.add_argument("--age-forecast", action="store_true", help="ML-прогноз по возрастным группам 0–14 / 15+ (отдельная HGB-модель на группу).")
 
@@ -282,7 +282,7 @@ def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
         chains=args.br_chains,
         random_seed=args.br_seed,
         age_groups=bool(args.br_age_groups),
-        age_contact_structure=getattr(args, "br_age_contacts", "matrix"),
+        age_contact_structure=getattr(args, "br_age_contacts", "fine_5y"),
         bootstrap_replicates=getattr(args, "br_bootstrap_replicates", 100),
     )
 

@@ -17,3 +17,13 @@ python research/contact_matrix_uncertainty/best4.py research/contact_matrix_unce
 ```
 
 Выводы — в `docs/age_groups.md`, раздел «Неопределённость матрицы контактов».
+
+## Матрица авторов и нормировка (после сверки со статьёй)
+
+| Файл | Что делает |
+|---|---|
+| `s5.py` | матрица всех контактов из Supplementary File S5 (12 групп по 5 лет) |
+| `norm.py` | 2×2 RSCF и 2×2, агрегированная из S5, × нормировка «вся популяция / kappa» (как было) и «численность группы-источника» (как в SIR статьи) → `results/normalization.jsonl` |
+| `fine.py` | сравнение `matrix` (RSCF 2×2), `fine_5y` (S5, 5 лет) и `authors_3g` (матрица авторов 0–6 / 7–14 / 15+); отжиг и MCMC → `results/structures.jsonl` |
+
+`run.py`, `seeds.py`, `best4.py` (сценарий погрешности элементов) считались на матрице RSCF 2×2.

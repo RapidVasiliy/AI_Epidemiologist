@@ -140,6 +140,11 @@ def build_age_group_weekly(
         frame["total_population"] = pop_g.reindex(total.index)
         frame["total_cases_formula"] = (total["total_cases_formula"] * share.reindex(total.index)).round()
         frame["inc_per_10k"] = frame["total_cases_formula"] / frame["total_population"] * 10_000
+        # численности исходных групп (0–2, 3–6, 7–14, 15+, 15–64, 65+) — для модели с 5-летними группами
+        for k in range(6):
+            col = f"population_age_group_{k}"
+            if col in indexed.columns:
+                frame[f"source_{col}"] = indexed[col].reindex(total.index)
         if weights is not None:
             frame["age_pcr_used"] = age_used.reindex(total.index).fillna(False).astype(bool)
         if "pcr_imputed" in indexed.columns:

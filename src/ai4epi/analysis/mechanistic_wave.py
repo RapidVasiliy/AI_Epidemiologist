@@ -33,10 +33,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai4epi.core.io import TableWriteOptions, write_json, write_table
 from ai4epi.mechanistic import (
+    AJELLI_LITVINOVA_3_GROUPS,
+    AJELLI_LITVINOVA_ALL_CONTACTS,
     RSCF_CONTACT_MATRIX_2,
     CalibrationResult,
+    FineAgeContactBRModel,
     ModelParams,
     calibrate,
+    fine_age_populations,
     get_model,
     model_observable,
     negative_binomial_noise,
@@ -173,13 +177,18 @@ class MechanisticWaveConfig(StrictModel):
     # "matrix": структура контактов фиксирована внешней матрицей (RSCF_Uncertainty,
     # 0–14 / 15+), калибруется один масштабный множитель (3 параметра вместо 6);
     # "free": четыре свободных коэффициента матрицы.
-    age_contact_structure: Literal["matrix", "free"] = "matrix"
+    # "fine_5y": сила инфекции по 5-летним группам и матрице Ajelli & Litvinova (2017, S5),
+    # выход суммируется до 0–14 / 15+ (рекомендация авторов матрицы); калибруются alpha
+    # двух групп и один множитель.
+    # "authors_3g": то же, но матрица 0–6 / 7–14 / 15+, агрегированная авторами.
+    age_contact_structure: Literal["matrix", "free", "fine_5y", "authors_3g"] = "fine_5y"
     age_contact_matrix: tuple[tuple[float, float], tuple[float, float]] = RSCF_CONTACT_MATRIX_2
     # Внешняя матрица описывает контакты между *всеми* инфицированными, а в модели
     # группа i содержит лишь регистрируемую долю kappa_i заражённых. Поэтому столбец
     # источника i делится на kappa_i (истинное число заразных = I_i / kappa_i).
     age_contact_kappa_correction: bool = True
     age_matrix_scale_upper: float = Field(default=10.0, gt=0.0)
+    age_fine_beta_upper: float = Field(default=1.0, gt=0.0)
 
 
 class MechanisticWaveOutputConfig(StrictModel):
@@ -794,12 +803,30 @@ def run_age_group_mechanistic(
     else:
         scale = [10_000.0 / n for n in populations]
     use_matrix = cfg.age_contact_structure == "matrix"
+    use_fine = cfg.age_contact_structure in ("fine_5y", "authors_3g")
     contact_matrix = None
     if use_matrix:
         contact_matrix = np.asarray(cfg.age_contact_matrix, dtype=float)
         if cfg.age_contact_kappa_correction:
             contact_matrix = contact_matrix / np.asarray(cfg.age_underreporting_kappa, dtype=float)[None, :]
-    model = get_model("age", contact_matrix=contact_matrix)
+    if use_fine:
+        detail = [f"source_population_age_group_{k}" for k in (0, 1, 2, 4, 5)]
+        if not set(detail) <= set(frames[0].columns) or frames[0][detail].iloc[0].isna().any():
+            warnings.append("нет численностей групп 0–2, 3–6, 7–14, 15–64, 65+; модель fine_5y не запущена.")
+            return None, None, None, warnings
+        pops = frames[0][detail].iloc[0].astype(float).tolist()
+        kappa = np.asarray(cfg.age_underreporting_kappa, dtype=float)
+        if cfg.age_contact_structure == "fine_5y":
+            n_fine = fine_age_populations(*pops)
+            group_index = np.array([0, 0, 0] + [1] * 9)
+            matrix = AJELLI_LITVINOVA_ALL_CONTACTS
+        else:
+            n_fine = np.array([pops[0] + pops[1], pops[2], pops[3] + pops[4]])
+            group_index = np.array([0, 0, 1])
+            matrix = AJELLI_LITVINOVA_3_GROUPS
+        model = FineAgeContactBRModel(n_fine * kappa[group_index], group_index, contact_matrix=matrix)
+    else:
+        model = get_model("age", contact_matrix=contact_matrix)
     template = ModelParams(
         alpha=[0.0, 0.0],
         beta=[0.0] * model.params_dims()[1],
@@ -814,7 +841,7 @@ def run_age_group_mechanistic(
         method=cfg.method,
         observation_scale=scale,
         epsilon=cfg.age_epsilon,
-        beta_upper=cfg.age_matrix_scale_upper if use_matrix else cfg.age_beta_upper,
+        beta_upper=cfg.age_fine_beta_upper if use_fine else cfg.age_matrix_scale_upper if use_matrix else cfg.age_beta_upper,
         n_samples=cfg.bootstrap_replicates if cfg.method == "bootstrap" else cfg.n_trajectories,
         tune=cfg.age_tune,
         draws=cfg.age_draws,
@@ -895,7 +922,7 @@ def run_age_group_mechanistic(
             f"MCMC: R-hat = {rhat:.2f} > {cfg.rhat_threshold}; "
             + ("оценки параметров возрастной модели ненадёжны." if use_matrix else "оценки матрицы контактов ненадёжны.")
         )
-    contact = model.contact(calibration.best_params)
+    contact = model.contact(calibration.best_params) if not use_fine else np.full((2, 2), np.nan)
     block: JsonObject = {
         "model_name_ru": "возрастная модель Барояна–Рвачёва (0–14 и 15+ лет)",
         "groups": groups_out,
@@ -903,12 +930,16 @@ def run_age_group_mechanistic(
         "children_peak_lead_note": "положительное значение — максимум у детей наступает раньше, чем у взрослых",
         "underreporting_kappa": list(cfg.age_underreporting_kappa),
         "alpha": [round(float(a), rd + 1) for a in calibration.best_params.alpha],
-        "contact_matrix": [[round(float(v), rd) for v in row] for row in contact],
+        "contact_matrix": None if use_fine else [[round(float(v), rd) for v in row] for row in contact],
+        "contact_scale": round(float(calibration.best_params.beta[0]), rd + 2) if use_fine else None,
         "contact_structure": cfg.age_contact_structure,
         "contact_matrix_note": (
             "строка — заражаемая группа, столбец — источник; структура матрицы задана внешней матрицей контактов "
             "(RSCF_Uncertainty) с поправкой на недоучёт по группам, по данным оценён только общий масштаб"
             if use_matrix
+            else "сила инфекции рассчитана по возрастным группам матрицы контактов Ajelli & Litvinova (2017) "
+            "и суммирована до 0–14 / 15+; по данным оценён только общий масштаб передачи"
+            if use_fine
             else "строка — заражаемая группа, столбец — источник; матрица плохо идентифицируема по двум недельным "
             "рядам, интерпретировать стоит фазы и максимумы групп, а не отдельные коэффициенты"
         ),
@@ -960,10 +991,10 @@ def _prepare_frame(influenza_weekly: pd.DataFrame, origin_date: Any) -> pd.DataF
     missing = [c for c in required if c not in influenza_weekly.columns]
     if missing:
         raise MechanisticWaveError(f"В influenza_weekly отсутствуют столбцы {missing} (нужны для модели Барояна–Рвачёва).")
-    columns = required + (["pcr_imputed"] if "pcr_imputed" in influenza_weekly.columns else [])
-    df = influenza_weekly.loc[:, columns].copy()
+    extra = [c for c in influenza_weekly.columns if c == "pcr_imputed" or c.startswith("source_population_")]
+    df = influenza_weekly.loc[:, required + extra].copy()
     df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.dropna().sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
+    df = df.dropna(subset=required).sort_values("datetime").drop_duplicates("datetime").reset_index(drop=True)
     if origin_date is not None:
         df = df[df["datetime"] <= pd.Timestamp(origin_date)].reset_index(drop=True)
     if df.empty:

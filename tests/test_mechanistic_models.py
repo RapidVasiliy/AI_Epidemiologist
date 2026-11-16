@@ -208,3 +208,29 @@ def test_bootstrap_calibration_returns_bundle():
     d = result.diagnostics
     assert d["residual_variance"][0] > 0 and d["failed_refits"] == 0
     assert d["parameter_sd"][0] > 0  # разброс параметров по репликам
+
+
+def test_fine_age_model_reduces_to_total_under_proportional_mixing():
+    from ai4epi.mechanistic import FineAgeContactBRModel
+
+    rho = np.array([30_000.0, 50_000.0, 120_000.0])
+    total = float(rho.sum())
+    proportional = np.tile(rho / total, (3, 1))  # M[k, m] ∝ rho_m: однородное перемешивание
+    model = FineAgeContactBRModel(rho, [0, 0, 1], contact_matrix=proportional)
+    assert model.params_dims() == (2, 1)
+    params = ModelParams([0.6, 0.6], [0.9], int(total), [0.4 * 100.0, 0.6 * 100.0])
+    fine = model.simulate(params, 140).newly_infected.sum(axis=0)
+    ref = get_model("total").simulate(ModelParams([0.6], [0.9], int(total), [100.0]), 140).newly_infected[0]
+    np.testing.assert_allclose(fine, ref, rtol=1e-3, atol=1.0)
+    r = model.reproduction_number(params, model.simulate(params, 140))
+    assert r[0] == pytest.approx(0.9 * 0.6 * float(np.sum(DEFAULT_INFECTIVITY_PROFILE)), rel=1e-3)
+
+
+def test_fine_age_populations_and_authors_matrix():
+    from ai4epi.mechanistic import AJELLI_LITVINOVA_ALL_CONTACTS
+    from ai4epi.mechanistic.models import fine_age_populations
+
+    pops = fine_age_populations(300.0, 400.0, 800.0, 5000.0, 1000.0)
+    assert len(pops) == 12 == len(AJELLI_LITVINOVA_ALL_CONTACTS)
+    assert pops.sum() == pytest.approx(300 + 400 + 800 + 5000 + 1000)
+    assert pops[:3].sum() == pytest.approx(300 + 400 + 800)
