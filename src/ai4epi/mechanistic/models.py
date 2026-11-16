@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from typing import Literal
 
 import numpy as np
 
@@ -89,16 +90,94 @@ class SimulationResult:
         return self.weekly_newly_infected().sum(axis=0)
 
 
+Incidence = Literal["linear_capped", "exponential"]
+
+
+def seir_kernel(
+    latent_mean: float = 1.2,
+    infectious_mean: float = 2.0,
+    *,
+    latent_shape: int = 1,
+    infectious_shape: int = 1,
+    max_days: int = 21,
+    substeps: int = 48,
+) -> np.ndarray:
+    """Профиль заразности SEIR (Кермак–Маккендрик): доля суток τ, проведённая в стадии I.
+
+    Заразившийся проходит стадию E (распределение Эрланга с формой ``latent_shape`` и средним
+    ``latent_mean`` суток), затем I (``infectious_shape``, ``infectious_mean``) и заразен с
+    постоянной интенсивностью в стадии I. g_τ = ∫_τ^{τ+1} P(в стадии I в момент s) ds, поэтому
+    Σg = средняя длительность I, а модель обновления с этим профилем — дискретный аналог
+    SEIR-модели (классическая SEIR — формы 1). Вычисляется марковской цепью стадий с мелким шагом.
+    """
+
+    k_e, k_i = int(latent_shape), int(infectious_shape)
+    n = k_e + k_i
+    rates = np.array([k_e / latent_mean] * k_e + [k_i / infectious_mean] * k_i)
+    dt = 1.0 / substeps
+    p = np.zeros(n + 1)  # последнее состояние — выздоровевшие
+    p[0] = 1.0
+    g = np.zeros(max_days)
+    for day in range(max_days):
+        acc = 0.0
+        for _ in range(substeps):
+            acc += p[k_e:n].sum() * dt
+            flow = p[:n] * (1.0 - np.exp(-rates * dt))
+            p[:n] -= flow
+            p[1 : n + 1] += flow
+        g[day] = acc
+    return g
+
+
+def mean_generation_time(profile: Sequence[float]) -> float:
+    g = np.asarray(profile, dtype=float)
+    days = np.arange(len(g)) + 0.5
+    return float((days * g).sum() / g.sum())
+
+
 class BaroyanRvachevModel:
-    """Базовый класс: профиль заразности и размерности параметров."""
+    """Базовый класс: профиль заразности, форма заболеваемости и размерности параметров.
+
+    Общее ядро моделей обновления (Барояна–Рвачёва и SEIR как частный профиль ``g``):
+
+    * ``incidence="linear_capped"`` — исходная форма БР: j_{t+1} = min(β·S·I/ρ, S), S_0 = floor(α·ρ),
+      I = min(Σ g·j, ρ) (воспроизводит Influenza_bulletin);
+    * ``incidence="exponential"`` — гладкая форма: j_{t+1} = S·(1 − exp(−β·I/ρ)), S_0 = α·ρ, без
+      ограничений сверху (при малой силе инфекции совпадает с линейной; нужна для градиентных
+      методов калибровки).
+    """
 
     groups: int = 0
     alpha_dim: int = 0
     beta_dim: int = 0
     name: str = "base"
 
-    def __init__(self, infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE) -> None:
+    def __init__(
+        self,
+        infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE,
+        incidence: Incidence = "linear_capped",
+    ) -> None:
         self.g = np.asarray(infectivity_profile, dtype=float)
+        if incidence not in ("linear_capped", "exponential"):
+            raise ValueError(f"Неизвестная форма заболеваемости {incidence!r}.")
+        self.incidence = incidence
+
+    def symbolic_spec(self, params: ModelParams) -> dict:
+        """Описание модели для ``differentiable.weekly_observable_tensor`` (только гладкая форма)."""
+
+        raise NotImplementedError(f"Модель {self.name!r} не поддерживает градиентную калибровку.")
+
+    def _initial_susceptible(self, alpha: np.ndarray | float, rho: np.ndarray | float) -> np.ndarray | float:
+        value = np.asarray(alpha, dtype=float) * np.asarray(rho, dtype=float)
+        return np.floor(value) if self.incidence == "linear_capped" else value
+
+    def _new_infections(self, susceptible: np.ndarray | float, force: np.ndarray | float) -> np.ndarray | float:
+        if self.incidence == "linear_capped":
+            return np.minimum(susceptible * force, susceptible)
+        return susceptible * (1.0 - np.exp(-np.asarray(force, dtype=float)))
+
+    def _cap_infected(self, value: np.ndarray | float, rho: np.ndarray | float) -> np.ndarray | float:
+        return np.minimum(value, rho) if self.incidence == "linear_capped" else value
 
     def params_dims(self) -> tuple[int, int]:
         return self.alpha_dim, self.beta_dim
@@ -148,7 +227,7 @@ class TotalBRModel(BaroyanRvachevModel):
         rho = float(params.population_size)
         i0 = float(params.initial_infectious[0])
 
-        s0 = int(alpha * rho)
+        s0 = float(self._initial_susceptible(alpha, rho))
         newly = np.zeros(duration_days)
         infected = np.zeros(duration_days)
         susceptible = np.zeros(duration_days)
@@ -157,11 +236,20 @@ class TotalBRModel(BaroyanRvachevModel):
         susceptible[0] = s0
 
         for day in range(duration_days - 1):
-            infected[day] = min(self._infected(newly, day), rho)
-            newly[day + 1] = min(beta * susceptible[day] * infected[day] / rho, susceptible[day])
+            infected[day] = self._cap_infected(self._infected(newly, day), rho)
+            newly[day + 1] = self._new_infections(susceptible[day], beta * infected[day] / rho)
             susceptible[day + 1] = susceptible[day] - newly[day + 1]
 
         return SimulationResult(newly[None, :], infected[None, :], susceptible[None, :])
+
+    def symbolic_spec(self, params: ModelParams) -> dict:
+        return {
+            "profile": self.g,
+            "rho": [float(params.population_size)],
+            "group_index": [0],
+            "matrix": [[1.0]],
+            "initial_infectious": [float(params.initial_infectious[0])],
+        }
 
 
 class AgeGroupBRModel(BaroyanRvachevModel):
@@ -197,8 +285,9 @@ class AgeGroupBRModel(BaroyanRvachevModel):
         self,
         infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE,
         contact_matrix: Sequence[Sequence[float]] | None = None,
+        incidence: Incidence = "linear_capped",
     ) -> None:
-        super().__init__(infectivity_profile)
+        super().__init__(infectivity_profile, incidence)
         self.contact_structure = None if contact_matrix is None else normalized_contact_matrix(contact_matrix)
         if self.contact_structure is not None:
             if self.contact_structure.shape != (self.groups, self.groups):
@@ -224,13 +313,13 @@ class AgeGroupBRModel(BaroyanRvachevModel):
         susceptible = np.zeros((self.groups, duration_days))
         newly[:, 0] = i0
         infected[:, 0] = i0
-        susceptible[:, 0] = np.floor(alpha * rho_g)
+        susceptible[:, 0] = self._initial_susceptible(alpha, rho_g)
 
         for day in range(duration_days - 1):
             for j in range(self.groups):
-                infected[j, day] = min(self._infected(newly[j], day), rho_g[j])
+                infected[j, day] = self._cap_infected(self._infected(newly[j], day), rho_g[j])
             force = contact @ infected[:, day] / rho
-            newly[:, day + 1] = np.minimum(susceptible[:, day] * force, susceptible[:, day])
+            newly[:, day + 1] = self._new_infections(susceptible[:, day], force)
             susceptible[:, day + 1] = susceptible[:, day] - newly[:, day + 1]
         return SimulationResult(newly, infected, susceptible)
 
@@ -296,8 +385,9 @@ class FineAgeContactBRModel(BaroyanRvachevModel):
         group_index: Sequence[int],
         contact_matrix: Sequence[Sequence[float]] = AJELLI_LITVINOVA_ALL_CONTACTS,
         infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE,
+        incidence: Incidence = "linear_capped",
     ) -> None:
-        super().__init__(infectivity_profile)
+        super().__init__(infectivity_profile, incidence)
         self.matrix = np.asarray(contact_matrix, dtype=float)
         self.internal_rho = np.asarray(internal_rho, dtype=float)
         self.group_index = np.asarray(group_index, dtype=int)
@@ -324,16 +414,28 @@ class FineAgeContactBRModel(BaroyanRvachevModel):
         susceptible = np.zeros((n, duration_days))
         infected = np.zeros((n, duration_days))
         newly[:, 0] = i0
-        susceptible[:, 0] = np.floor(alpha * rho)
+        susceptible[:, 0] = self._initial_susceptible(alpha, rho)
         g = self.g
         for day in range(duration_days - 1):
             lo = max(0, day - len(g) + 1)
             window = newly[:, lo : day + 1][:, ::-1]
-            infected[:, day] = np.minimum(window @ g[: window.shape[1]], rho)
+            infected[:, day] = self._cap_infected(window @ g[: window.shape[1]], rho)
             force = b @ infected[:, day]
-            newly[:, day + 1] = np.minimum(susceptible[:, day] * force, susceptible[:, day])
+            newly[:, day + 1] = self._new_infections(susceptible[:, day], force)
             susceptible[:, day + 1] = susceptible[:, day] - newly[:, day + 1]
         self._last_internal = SimulationResult(newly, infected, susceptible)
+        return self._aggregate(newly, infected, susceptible)
+
+    def symbolic_spec(self, params: ModelParams) -> dict:
+        return {
+            "profile": self.g,
+            "rho": self.internal_rho,
+            "group_index": self.group_index,
+            "matrix": self.matrix,
+            "initial_infectious": list(params.initial_infectious),
+        }
+
+    def _aggregate(self, newly: np.ndarray, infected: np.ndarray, susceptible: np.ndarray) -> SimulationResult:
         return SimulationResult(self._agg @ newly, self._agg @ infected, self._agg @ susceptible)
 
     def reproduction_number(self, params: ModelParams, sim: SimulationResult) -> np.ndarray:
@@ -363,14 +465,20 @@ def fine_age_populations(
     return np.asarray(out, dtype=float)
 
 
-def get_model(kind: str, *, contact_matrix: Sequence[Sequence[float]] | None = None) -> BaroyanRvachevModel:
+def get_model(
+    kind: str,
+    *,
+    contact_matrix: Sequence[Sequence[float]] | None = None,
+    infectivity_profile: Sequence[float] = DEFAULT_INFECTIVITY_PROFILE,
+    incidence: Incidence = "linear_capped",
+) -> BaroyanRvachevModel:
     """``"total"`` или ``"age"`` -> экземпляр модели (``contact_matrix`` — только для ``"age"``)."""
 
     match kind:
         case "total":
-            return TotalBRModel()
+            return TotalBRModel(infectivity_profile, incidence)
         case "age":
-            return AgeGroupBRModel(contact_matrix=contact_matrix)
+            return AgeGroupBRModel(infectivity_profile, contact_matrix=contact_matrix, incidence=incidence)
     raise ValueError(f"Неизвестный тип модели Барояна–Рвачёва: {kind!r} (ожидается 'total' или 'age').")
 
 
@@ -388,5 +496,7 @@ __all__ = [
     "TotalBRModel",
     "fine_age_populations",
     "get_model",
+    "mean_generation_time",
     "normalized_contact_matrix",
+    "seir_kernel",
 ]

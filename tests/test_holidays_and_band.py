@@ -27,10 +27,30 @@ def test_holiday_features_follow_calendar():
 
 def test_holiday_features_in_supervised_dataset(synthetic_weekly):
     weekly = synthetic_weekly(lead_weeks=60, wave_weeks=40)
-    ds = build_supervised(weekly, config=FeatureEngineeringConfig(temp_cols=()))
+    ds = build_supervised(weekly, config=FeatureEngineeringConfig(temp_cols=(), holiday_features=True))
     assert {"holiday_lag_pos", "holiday_ahead_pos"} <= set(ds.feature_cols)
-    off = build_supervised(weekly, config=FeatureEngineeringConfig(temp_cols=(), holiday_features=False))
+    off = build_supervised(weekly, config=FeatureEngineeringConfig(temp_cols=()))
     assert "holiday_lag_pos" not in off.feature_cols
+    assert "y_observed" not in off.feature_cols
+
+
+def test_holiday_adjustment_and_reporting_ratio():
+    from ai4epi.analysis.preprocessing import apply_holiday_ratio, holiday_adjusted_series, holiday_reporting_ratio
+
+    dates = pd.date_range("2014-09-01", "2019-03-25", freq="7D")
+    base = 20 + 10 * np.sin(np.arange(len(dates)) / 8)
+    holiday = is_holiday_week(dates)
+    observed = np.where(holiday, base * 0.4, base)
+    adjusted = holiday_adjusted_series(dates, observed)
+    np.testing.assert_allclose(adjusted[holiday], base[holiday], rtol=0.05)
+    assert holiday_reporting_ratio(dates, observed) == pytest.approx(0.4, rel=0.05)
+    assert holiday_reporting_ratio(dates[:60], observed[:60]) is None  # меньше трёх сезонов
+    # последняя неделя — праздничная: следующей недели нет, берётся предыдущая
+    last = np.flatnonzero(holiday)[-1]
+    cut = holiday_adjusted_series(dates[: last + 1], observed[: last + 1])
+    assert cut[-1] == observed[last - 1]
+    targets = dates[holiday][:2].append(dates[~holiday][:1])
+    assert apply_holiday_ratio(np.array([10.0, 10.0, 10.0]), targets, 0.4).tolist() == [4.0, 4.0, 10.0]
 
 
 def test_calibration_ignores_zero_weight_weeks():

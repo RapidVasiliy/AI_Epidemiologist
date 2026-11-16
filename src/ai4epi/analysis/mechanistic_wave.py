@@ -48,6 +48,7 @@ from ai4epi.mechanistic import (
     negative_binomial_noise,
     r2_score_np,
 )
+from ai4epi.mechanistic.models import DEFAULT_INFECTIVITY_PROFILE, seir_kernel
 
 JsonObject = dict[str, Any]
 WaveStageStatus = Literal["ok", "no_wave", "insufficient_data"]
@@ -119,7 +120,21 @@ class MechanisticWaveConfig(StrictModel):
     ``season_start_week`` (так считались рисунки статьи для РФ, 35-я неделя).
     """
 
-    method: Literal["mcmc", "abc", "optuna", "annealing", "bootstrap"] = "mcmc"
+    method: Literal["mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"] = "mcmc"
+    # --- ядро модели обновления ----------------------------------------------
+    # "br" — эмпирический профиль заразности Барояна–Рвачёва; "seir" — профиль SEIR
+    # (Кермак–Маккендрик: стадии E и I с распределением Эрланга, заразность постоянна в I).
+    # По умолчанию средний интервал между поколениями SEIR (≈ 3.6 сут) равен БР, различается
+    # только форма профиля. incidence: "auto" — исходная форма БР (min/floor), для NUTS —
+    # гладкая S·(1 − exp(−λ)).
+    model_kernel: Literal["br", "seir"] = "br"
+    incidence: Literal["auto", "linear_capped", "exponential"] = "auto"
+    seir_latent_mean: float = Field(default=1.6, gt=0.0)
+    seir_infectious_mean: float = Field(default=2.0, gt=0.0)
+    seir_latent_shape: int = Field(default=1, ge=1)
+    seir_infectious_shape: int = Field(default=1, ge=1)
+    nuts_tune: int = Field(default=1000, ge=0)
+    nuts_draws: int = Field(default=500, ge=10)
     season_start_week: int = Field(default=35, ge=1, le=53)
     calibration_start: Literal["wave_onset", "season_start"] = "wave_onset"
     onset_lead_weeks: int = Field(default=2, ge=0, le=12)
@@ -202,6 +217,29 @@ class MechanisticWaveConfig(StrictModel):
     age_contact_kappa_correction: bool = True
     age_matrix_scale_upper: float = Field(default=10.0, gt=0.0)
     age_fine_beta_upper: float = Field(default=1.0, gt=0.0)
+
+    def kernel_profile(self) -> np.ndarray:
+        if self.model_kernel == "seir":
+            return seir_kernel(
+                self.seir_latent_mean,
+                self.seir_infectious_mean,
+                latent_shape=self.seir_latent_shape,
+                infectious_shape=self.seir_infectious_shape,
+            )
+        return np.asarray(DEFAULT_INFECTIVITY_PROFILE, dtype=float)
+
+    def resolved_incidence(self) -> str:
+        if self.incidence != "auto":
+            return self.incidence
+        return "exponential" if self.method == "nuts" else "linear_capped"
+
+    def beta_scale(self) -> float:
+        """Множитель верхней границы β: тот же диапазон R_0 = β·α·Σg, что у профиля БР."""
+
+        return float(np.sum(DEFAULT_INFECTIVITY_PROFILE) / np.sum(self.kernel_profile()))
+
+    def sampler_settings(self, tune: int, draws: int) -> tuple[int, int]:
+        return (self.nuts_tune, self.nuts_draws) if self.method == "nuts" else (tune, draws)
 
 
 class MechanisticWaveOutputConfig(StrictModel):
@@ -316,13 +354,14 @@ def run_mechanistic_wave_analysis(
     population = float(window["total_population"].iloc[0])
     per_10k = 10_000.0 / population
     observed_cases = window["total_cases_formula"].to_numpy(float)
-    model = get_model("total")
+    model = get_model("total", infectivity_profile=cfg.kernel_profile(), incidence=cfg.resolved_incidence())
     template = ModelParams(
         alpha=[0.0],
         beta=[0.0],
         population_size=int(population * cfg.underreporting_kappa),
         initial_infectious=[cfg.initial_infectious],
     )
+    tune, draws = cfg.sampler_settings(cfg.tune, cfg.draws)
     calibration = calibrate(
         model,
         observed_cases,
@@ -330,9 +369,10 @@ def run_mechanistic_wave_analysis(
         method=cfg.method,
         observation_scale=per_10k if cfg.observation_scale == "per_10k" else 1.0,
         epsilon=cfg.epsilon,
+        beta_upper=1.0 * cfg.beta_scale(),
         n_samples=cfg.bootstrap_replicates if cfg.method == "bootstrap" else cfg.n_trajectories,
-        tune=cfg.tune,
-        draws=cfg.draws,
+        tune=tune,
+        draws=draws,
         chains=cfg.chains,
         cores=cfg.cores,
         n_trials=cfg.n_trials,
@@ -596,7 +636,8 @@ def build_mechanistic_wave_context(
 
     early_caution = phase == "growth"
     block: JsonObject = {
-        "model_name_ru": "модель Барояна–Рвачёва",
+        "model_name_ru": "модель Барояна–Рвачёва" if cfg.model_kernel == "br" else "модель SEIR (Кермака–Маккендрика)",
+        "model_kernel": cfg.model_kernel,
         "model_description_ru": MODEL_DESCRIPTION_RU,
         "season_label": season_label,
         "calibration_start_date": calibration_start.date().isoformat(),
@@ -891,9 +932,24 @@ def run_age_group_mechanistic(
             n_fine = np.array([pops[0] + pops[1], pops[2], pops[3]])
             group_index = np.array([0, 0, 1])
             matrix = AJELLI_LITVINOVA_3_GROUPS
-        model = FineAgeContactBRModel(n_fine * kappa[group_index], group_index, contact_matrix=matrix)
+        model = FineAgeContactBRModel(
+            n_fine * kappa[group_index],
+            group_index,
+            contact_matrix=matrix,
+            infectivity_profile=cfg.kernel_profile(),
+            incidence=cfg.resolved_incidence(),
+        )
     else:
-        model = get_model("age", contact_matrix=contact_matrix)
+        if cfg.method == "nuts":
+            warnings.append("NUTS поддерживает только возрастные модели fine_5y / authors_3g; калибровка пропущена.")
+            return None, None, None, warnings
+        model = get_model(
+            "age",
+            contact_matrix=contact_matrix,
+            infectivity_profile=cfg.kernel_profile(),
+            incidence=cfg.resolved_incidence(),
+        )
+    age_tune, age_draws = cfg.sampler_settings(cfg.age_tune, cfg.age_draws)
     template = ModelParams(
         alpha=[0.0, 0.0],
         beta=[0.0] * model.params_dims()[1],
@@ -908,10 +964,11 @@ def run_age_group_mechanistic(
         method=cfg.method,
         observation_scale=scale,
         epsilon=cfg.age_epsilon,
-        beta_upper=cfg.age_fine_beta_upper if use_fine else cfg.age_matrix_scale_upper if use_matrix else cfg.age_beta_upper,
+        beta_upper=cfg.beta_scale()
+        * (cfg.age_fine_beta_upper if use_fine else cfg.age_matrix_scale_upper if use_matrix else cfg.age_beta_upper),
         n_samples=cfg.bootstrap_replicates if cfg.method == "bootstrap" else cfg.n_trajectories,
-        tune=cfg.age_tune,
-        draws=cfg.age_draws,
+        tune=age_tune,
+        draws=age_draws,
         chains=cfg.chains,
         cores=cfg.cores,
         n_trials=cfg.n_trials,
@@ -1139,6 +1196,7 @@ def _method_ru(method: str) -> str:
         "optuna": "оптимизация R² (Optuna)",
         "annealing": "оптимизация R² (двойной отжиг)",
         "bootstrap": "параметрический бутстреп (отрицательно-биномиальный шум, перекалибровка)",
+        "nuts": "байесовская оценка (явное правдоподобие, NUTS)",
     }[method]
 
 

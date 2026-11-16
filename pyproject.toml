@@ -143,6 +143,7 @@ markers = [
 ]
 filterwarnings = [
   "error",
+  "ignore:PyTensor could not link to a BLAS:UserWarning",
   "ignore::DeprecationWarning:shap.*",
   "ignore::DeprecationWarning:numba.*",
   "ignore::RuntimeWarning:pymc.*",

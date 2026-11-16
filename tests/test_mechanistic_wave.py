@@ -133,7 +133,7 @@ def test_bootstrap_band_and_reproduction_number(synthetic_weekly):
     noisy["total_cases_formula"] = np.maximum(noisy["total_cases_formula"] * rng.normal(1, 0.1, len(noisy)), 0).round()
     noisy["inc_per_10k"] = noisy["total_cases_formula"] / noisy["total_population"] * 10_000
     origin = noisy["datetime"].iloc[14]
-    cfg = MechanisticWaveConfig(method="bootstrap", bootstrap_replicates=15, random_seed=0)
+    cfg = MechanisticWaveConfig(method="bootstrap", bootstrap_replicates=15, random_seed=0, br_band="model")
     res = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=cfg)
     assert res.status == "ok"
     block = res.context_block
@@ -149,3 +149,31 @@ def test_bootstrap_band_and_reproduction_number(synthetic_weekly):
     )
     width = lambda t: float((t["q95"] - t["q05"]).mean())  # noqa: E731
     assert width(param.trajectories) < width(traj)  # шум наблюдений расширяет полосу
+
+
+def test_seir_kernel_configuration(synthetic_weekly):
+    from ai4epi.mechanistic.models import DEFAULT_INFECTIVITY_PROFILE, mean_generation_time
+
+    cfg = MechanisticWaveConfig(method="annealing", random_seed=0, model_kernel="seir", br_band="model")
+    g = cfg.kernel_profile()
+    # по умолчанию средний интервал между поколениями SEIR близок к БР — различается форма профиля
+    assert mean_generation_time(g) == pytest.approx(mean_generation_time(DEFAULT_INFECTIVITY_PROFILE), abs=0.3)
+    assert cfg.beta_scale() == pytest.approx(np.sum(DEFAULT_INFECTIVITY_PROFILE) / g.sum())
+    weekly = synthetic_weekly()
+    res = run_mechanistic_wave_analysis(weekly, origin_date=weekly["datetime"].iloc[16], config=cfg)
+    assert res.status == "ok"
+    assert res.context_block["model_kernel"] == "seir" and "SEIR" in res.context_block["model_name_ru"]
+    assert res.context_block["fit_r2_in_sample"] > 0.9  # данные порождены моделью БР, SEIR описывает их близко
+    assert MechanisticWaveConfig(method="nuts").resolved_incidence() == "exponential"
+    assert MechanisticWaveConfig().resolved_incidence() == "linear_capped"
+
+
+@pytest.mark.slow
+def test_nuts_calibration_on_synthetic_wave(synthetic_weekly):
+    weekly = synthetic_weekly()
+    cfg = MechanisticWaveConfig(method="nuts", nuts_tune=300, nuts_draws=200, chains=2, cores=1, random_seed=0, br_band="model")
+    res = run_mechanistic_wave_analysis(weekly, origin_date=weekly["datetime"].iloc[16], config=cfg)
+    block = res.context_block
+    assert res.status == "ok" and block["method"] == "nuts"
+    assert block["fit_r2_in_sample"] > 0.95
+    assert block["diagnostics"]["r_hat_max"] < 1.1

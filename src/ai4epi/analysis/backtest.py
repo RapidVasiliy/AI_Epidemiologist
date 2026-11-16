@@ -39,7 +39,7 @@ from ai4epi.analysis.forecasting import (
     fit_models_hist_gbdt,
 )
 from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig, run_mechanistic_wave_analysis
-from ai4epi.analysis.preprocessing import FeatureEngineeringConfig, build_supervised
+from ai4epi.analysis.preprocessing import FeatureEngineeringConfig, apply_holiday_ratio, build_supervised
 from ai4epi.core.io import TableWriteOptions, write_json, write_table
 
 JsonObject = dict[str, Any]
@@ -191,7 +191,9 @@ def _origin_task_impl(
         ys = [data.loc[valid, c].to_numpy(float) for c in sup.target_cols]
         for name, point_cfg in cfg.model_variants.items():
             models = fit_models_hist_gbdt(X, ys, config=point_cfg, random_state=cfg.random_state)
-            preds[name] = np.clip(np.array([m.predict(x0)[0] for m in models], dtype=float), 0.0, None)
+            point = np.clip(np.array([m.predict(x0)[0] for m in models], dtype=float), 0.0, None)
+            targets = [origin + pd.Timedelta(weeks=h) for h in range(1, cfg.horizons + 1)]
+            preds[name] = apply_holiday_ratio(point, targets, sup.holiday_ratio, fcfg.holiday_iso_weeks)
     else:
         base["status"] = "insufficient_training_data"
 

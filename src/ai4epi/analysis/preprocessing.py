@@ -111,10 +111,15 @@ class FeatureEngineeringConfig(StrictModel):
     fourier_k: int = Field(default=2, ge=0, le=12)
     fourier_period: int = Field(default=52, ge=1)
     growth_lags: tuple[int, ...] = (1, 2, 4)
-    # Праздничные недели (регистрация систематически занижена, в СПб на 1-й ISO-неделе —
-    # в среднем до 0.35 от соседних): признаки holiday_lag_pos (на каком лаге текущей
-    # недели праздничная неделя, −1 — нет) и holiday_ahead_pos (на каком горизонте, 0 — нет).
-    holiday_features: bool = True
+    # Праздничные недели: регистрация систематически занижена (СПб, 1-я ISO-неделя — в
+    # среднем до 0.35 от соседних). holiday_adjust: модель учится на ряде, где такие недели
+    # заменены интерполяцией соседних (лаги и цели не искажены провалом), а прогноз на
+    # праздничную неделю умножается на долю её регистрации по прошлым сезонам города
+    # (holiday_reporting_ratio). holiday_features: календарные признаки holiday_lag_pos /
+    # holiday_ahead_pos; при min_samples_leaf порядка 100 и ~1 праздничной неделе в год
+    # деревья их не используют, поэтому по умолчанию выключены.
+    holiday_adjust: bool = True
+    holiday_features: bool = False
     holiday_iso_weeks: tuple[int, ...] = (1,)
     epidemic_dynamics_eps: float = Field(default=1e-6, gt=0)
     raw_columns_to_drop: tuple[str, ...] = (
@@ -182,6 +187,8 @@ class SupervisedDataset(StrictModel):
     valid_row_count: int = Field(ge=0)
     origin_index: int | None = Field(default=None, ge=0)
     origin_date: pd.Timestamp | None = None
+    # доля регистрации праздничной недели (медиана по прошлым сезонам), None — поправки нет
+    holiday_ratio: float | None = None
 
     @field_validator("data")
     @classmethod
@@ -582,6 +589,69 @@ def is_holiday_week(dates: pd.Series | pd.DatetimeIndex, holiday_iso_weeks: Sequ
     return np.isin(weeks, np.asarray(holiday_iso_weeks, dtype=int))
 
 
+def holiday_adjusted_series(
+    dates: pd.Series | pd.DatetimeIndex,
+    values: np.ndarray,
+    holiday_iso_weeks: Sequence[int] = (1,),
+) -> np.ndarray:
+    """Значения праздничных недель заменены линейной интерполяцией соседних недель.
+
+    Последняя неделя ряда, если она праздничная, заменяется значением предыдущей недели
+    (следующая ещё неизвестна): данные после неё не используются.
+    """
+
+    values = np.asarray(values, dtype=float)
+    holiday = is_holiday_week(dates, holiday_iso_weeks)
+    if not holiday.any():
+        return values.copy()
+    series = pd.Series(np.where(holiday, np.nan, values))
+    return series.interpolate(limit_area="inside").ffill().bfill().to_numpy(float)
+
+
+def holiday_reporting_ratio(
+    dates: pd.Series | pd.DatetimeIndex,
+    values: np.ndarray,
+    holiday_iso_weeks: Sequence[int] = (1,),
+    *,
+    min_level: float = 1.0,
+    min_seasons: int = 3,
+    bounds: tuple[float, float] = (0.1, 1.5),
+) -> float | None:
+    """Медиана отношения «праздничная неделя / среднее соседних» по прошлым сезонам.
+
+    Учитываются праздничные недели с обеими соседними неделями в ряду и средним соседей не
+    ниже ``min_level`` (иначе отношение — шум). Меньше ``min_seasons`` таких недель — ``None``.
+    """
+
+    values = np.asarray(values, dtype=float)
+    holiday = is_holiday_week(dates, holiday_iso_weeks)
+    ratios = []
+    for i in np.flatnonzero(holiday):
+        if 0 < i < len(values) - 1 and not holiday[i - 1] and not holiday[i + 1]:
+            base = (values[i - 1] + values[i + 1]) / 2
+            if np.isfinite(base) and base >= min_level and np.isfinite(values[i]):
+                ratios.append(values[i] / base)
+    if len(ratios) < min_seasons:
+        return None
+    return float(np.clip(np.median(ratios), *bounds))
+
+
+def apply_holiday_ratio(
+    values: np.ndarray,
+    target_dates: Sequence[pd.Timestamp] | pd.DatetimeIndex,
+    ratio: float | None,
+    holiday_iso_weeks: Sequence[int] = (1,),
+) -> np.ndarray:
+    """Прогноз на праздничные недели умножается на долю их регистрации ``ratio``."""
+
+    out = np.asarray(values, dtype=float).copy()
+    if ratio is None:
+        return out
+    mask = is_holiday_week(pd.DatetimeIndex(target_dates), holiday_iso_weeks)
+    out[mask] *= ratio
+    return out
+
+
 def add_holiday_features(
     data: pd.DataFrame,
     *,
@@ -643,6 +713,12 @@ def build_supervised(
         frame_name="model input frame",
     )
     _coerce_numeric_columns(data, [cfg.target_col, cfg.iso_year_col, cfg.iso_week_col, *cfg.temp_cols])
+    holiday_ratio: float | None = None
+    if cfg.holiday_adjust:
+        observed = data[cfg.target_col].to_numpy(float)
+        holiday_ratio = holiday_reporting_ratio(data[cfg.datetime_col], observed, cfg.holiday_iso_weeks)
+        data["y_observed"] = observed
+        data[cfg.target_col] = holiday_adjusted_series(data[cfg.datetime_col], observed, cfg.holiday_iso_weeks)
 
     data = add_fourier_week_features(
         data,
@@ -679,6 +755,7 @@ def build_supervised(
     drop_cols = {
         cfg.datetime_col,
         cfg.target_col,
+        "y_observed",
         *cfg.raw_columns_to_drop,
         *target_cols,
     }
@@ -711,6 +788,7 @@ def build_supervised(
         valid_row_count=int(valid_mask.sum()),
         origin_index=origin_index,
         origin_date=origin_date,
+        holiday_ratio=holiday_ratio,
     )
 
 

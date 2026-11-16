@@ -261,7 +261,8 @@ def _add_run_all_command(subparsers: argparse._SubParsersAction[argparse.Argumen
 def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("модель Барояна–Рвачёва и возрастные группы")
     group.add_argument("--mechanistic-wave", action="store_true", help="Включить этап модели Барояна–Рвачёва (фаза волны, пик, сопоставление с ML).")
-    group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
+    group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
+    group.add_argument("--br-kernel", choices=("br", "seir"), default="br", help="Профиль заразности: Барояна–Рвачёва или SEIR (Кермак–Маккендрик).")
     group.add_argument("--br-epsilon", type=float, default=1.0, help="Масштаб ABC-ядра (в случаях на 10 тыс.). По умолчанию: %(default)s.")
     group.add_argument("--br-calibration-start", choices=("wave_onset", "season_start"), default="wave_onset", help="Начало калибровки: от начала роста или с недели --br-season-start-week.")
     group.add_argument("--br-calibration-start-date", default=None, help="Явная дата начала калибровки (YYYY-MM-DD).")
@@ -290,6 +291,7 @@ def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
         age_groups=bool(args.br_age_groups),
         age_contact_structure=getattr(args, "br_age_contacts", "fine_5y"),
         bootstrap_replicates=getattr(args, "br_bootstrap_replicates", 100),
+        model_kernel=getattr(args, "br_kernel", "br"),
     )
 
 
@@ -402,7 +404,8 @@ def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.
     parser.add_argument("--end", required=True, help="Последняя неделя проверки (YYYY-MM-DD).")
     parser.add_argument("--output-dir", default="runs/backtest", type=Path, help="Каталог: predictions.csv, metrics.json, report.md.")
     parser.add_argument("--no-mechanistic", action="store_true", help="Не калибровать модель Барояна–Рвачёва на каждой неделе.")
-    parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap"), default="mcmc", help="Метод калибровки модели БР.")
+    parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"), default="mcmc", help="Метод калибровки модели БР.")
+    parser.add_argument("--br-kernel", choices=("br", "seir"), default="br", help="Профиль заразности: Барояна–Рвачёва или SEIR.")
     parser.add_argument("--legacy-variant", action="store_true", help="Дополнительно оценить исходный HGB (learning_rate 0.001, 8000 итераций).")
     parser.add_argument("--warmup-weeks", type=int, default=52, help="Недели разогрева для конформных интервалов (не входят в метрики).")
     parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР.")
@@ -425,7 +428,7 @@ def _cmd_backtest_local(args: argparse.Namespace) -> int:
         end=args.end,
         model_variants=variants,
         run_mechanistic=not args.no_mechanistic,
-        mechanistic=MechanisticWaveConfig(method=args.br_method, cores=1),
+        mechanistic=MechanisticWaveConfig(method=args.br_method, model_kernel=args.br_kernel, cores=1),
         interval_warmup_weeks=args.warmup_weeks,
         **kwargs,
     )

@@ -41,6 +41,7 @@ from ai4epi.analysis.preprocessing import (
     HoldoutSplitConfig,
     SupervisedDataset,
     TimeHoldoutSplit,
+    apply_holiday_ratio,
     build_supervised,
     make_time_holdout_split,
     supervised_to_feature_list_frame,
@@ -932,6 +933,13 @@ def run_forecast(
     if pd.isna(origin_date):
         raise ForecastingError("origin_date не определён: невозможно построить production forecast.")
     future_dates = infer_future_dates(supervised.data, origin_date, cfg.horizons, datetime_col=cfg.datetime_col)
+    if supervised.holiday_ratio is not None:
+        # модель прогнозирует ряд без праздничного провала; регистрацию праздничной недели
+        # возвращаем долей, оценённой по прошлым сезонам (ai4epi.analysis.preprocessing)
+        weeks = supervised.config.holiday_iso_weeks
+        y_hat = apply_holiday_ratio(y_hat, future_dates, supervised.holiday_ratio, weeks)
+        y_lo = apply_holiday_ratio(y_lo, future_dates, supervised.holiday_ratio, weeks)
+        y_hi = apply_holiday_ratio(y_hi, future_dates, supervised.holiday_ratio, weeks)
 
     model_registry = build_model_registry(
         point_models=models_prod,

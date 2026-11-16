@@ -8,6 +8,9 @@
 * ``abc`` — тот же симулятор, sequential Monte Carlo (``pm.sample_smc``);
 * ``optuna`` — максимизация R² (TPE);
 * ``annealing`` — максимизация R² (``scipy.optimize.dual_annealing``);
+* ``nuts`` — явное правдоподобие (нормальное в шкале ``observation_scale``, масштаб ошибки σ
+  оценивается, σ ~ HalfNormal) и градиентный сэмплер NUTS по дифференцируемой реализации модели
+  (``ai4epi.mechanistic.differentiable``); только для гладкой формы ``incidence="exponential"``;
 * ``bootstrap`` — параметрический бутстреп, как в RSCF_Uncertainty
   (``BaroyanAgeMultistrain_v2/bootstrapping``): точечная оценка (минимум невязки,
   ``dual_annealing``), затем ``n_samples`` синтетических рядов «модель +
@@ -43,9 +46,9 @@ import numpy as np
 
 from ai4epi.mechanistic.models import BaroyanRvachevModel, ModelParams
 
-CalibrationMethod = Literal["mcmc", "abc", "optuna", "annealing", "bootstrap"]
+CalibrationMethod = Literal["mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"]
 TimeStep = Literal["week", "day"]
-CALIBRATION_METHODS: tuple[str, ...] = ("mcmc", "abc", "optuna", "annealing", "bootstrap")
+CALIBRATION_METHODS: tuple[str, ...] = ("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts")
 
 
 class CalibrationError(RuntimeError):
@@ -204,6 +207,47 @@ def calibrate(
             diagnostics=diagnostics,
         )
 
+    if method == "nuts":
+        if time_step != "week":
+            raise CalibrationError("Метод nuts поддерживает только недельный шаг.")
+        if getattr(model, "incidence", None) != "exponential":
+            raise CalibrationError("Метод nuts требует гладкую форму модели (incidence='exponential').")
+        alpha_s, beta_s, diagnostics = _nuts(
+            model,
+            template,
+            data,
+            base_scale,
+            weights,
+            n_steps=n_steps,
+            alpha_dim=alpha_dim,
+            beta_dim=beta_dim,
+            alpha_upper=alpha_upper,
+            beta_upper=beta_upper,
+            n_samples=n_samples,
+            tune=tune,
+            draws=draws,
+            chains=chains,
+            cores=cores,
+            random_seed=random_seed,
+        )
+        if best_estimate == "min_distance":
+            distances = [float(np.sum((observable(a, b) - scaled) ** 2)) for a, b in zip(alpha_s, beta_s, strict=True)]
+            k = int(np.argmin(distances))
+            best = template.with_values(alpha_s[k], beta_s[k])
+        else:
+            best = template.with_values(alpha_s.mean(axis=0), beta_s.mean(axis=0))
+        diagnostics["best_estimate"] = best_estimate
+        return CalibrationResult(
+            method=method,
+            best_params=best,
+            alpha_samples=alpha_s,
+            beta_samples=beta_s,
+            template=template,
+            observation_scale=float(scale_per_group[0]) if alpha_dim == 1 else scale_per_group.tolist(),
+            epsilon=None,
+            diagnostics=diagnostics,
+        )
+
     if method == "bootstrap":
         x, alpha_s, beta_s, diagnostics = _bootstrap(
             observable,
@@ -359,6 +403,79 @@ def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, 
     bounds = [(0.0, alpha_upper)] * alpha_dim + [(0.0, beta_upper)] * beta_dim
     res = dual_annealing(loss, bounds=bounds, seed=random_seed)
     return np.asarray(res.x, dtype=float), float(-res.fun)
+
+
+def _nuts(
+    model: BaroyanRvachevModel,
+    template: ModelParams,
+    data: np.ndarray,
+    base_scale: np.ndarray,
+    weights: np.ndarray,
+    *,
+    n_steps: int,
+    alpha_dim: int,
+    beta_dim: int,
+    alpha_upper: float,
+    beta_upper: float,
+    n_samples: int,
+    tune: int,
+    draws: int,
+    chains: int,
+    cores: int | None,
+    random_seed: int | None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    try:
+        import arviz as az
+        import pymc as pm
+    except ImportError as exc:  # pragma: no cover
+        raise CalibrationError("Метод nuts требует PyMC 5: pip install -e '.[mechanistic]'.") from exc
+    from ai4epi.mechanistic.differentiable import weekly_observable_tensor
+
+    if beta_dim != 1:
+        raise CalibrationError("Метод nuts поддерживает модели с одним параметром интенсивности передачи.")
+    used = weights > 0
+    y = (data * base_scale)[used]
+    w = weights[used]
+    spec = model.symbolic_spec(template)
+    with pm.Model():
+        alpha = pm.Uniform("alpha", lower=0, upper=alpha_upper, shape=(alpha_dim,))
+        beta = pm.Uniform("beta", lower=0, upper=beta_upper, shape=(beta_dim,))
+        sigma = pm.HalfNormal("sigma", sigma=max(float(np.std(y)), 1e-6))
+        mu = weekly_observable_tensor(alpha, beta, n_weeks=n_steps, **spec) * base_scale
+        pm.Normal("obs", mu=mu[used], sigma=sigma / np.sqrt(w), observed=y)
+        idata = pm.sample(
+            tune=tune,
+            draws=draws,
+            chains=chains,
+            cores=cores,
+            target_accept=0.9,
+            progressbar=False,
+            random_seed=random_seed,
+            compute_convergence_checks=False,
+        )
+    posterior = idata.posterior.stack(samples=("chain", "draw"))
+    a_all = np.asarray(posterior["alpha"].transpose("samples", ...).values, dtype=float).reshape(-1, alpha_dim)
+    b_all = np.asarray(posterior["beta"].transpose("samples", ...).values, dtype=float).reshape(-1, beta_dim)
+    rng = np.random.default_rng(random_seed)
+    idx = rng.choice(len(a_all), size=n_samples, replace=len(a_all) < n_samples)
+    summary = az.summary(idata, var_names=["alpha", "beta", "sigma"], kind="diagnostics")
+    divergences = int(idata.sample_stats["diverging"].sum()) if "diverging" in idata.sample_stats else None
+    diagnostics = {
+        "sampler": "NUTS",
+        "chains": chains,
+        "draws": draws,
+        "tune": tune,
+        "posterior_size": len(a_all),
+        "r_hat_max": _finite_or_none(summary["r_hat"].max()),
+        "ess_bulk_min": _finite_or_none(summary["ess_bulk"].min()),
+        "divergences": divergences,
+        "sigma_mean": _finite_or_none(posterior["sigma"].mean()),
+        "per_parameter": {
+            str(name): {"r_hat": _finite_or_none(row["r_hat"]), "ess_bulk": _finite_or_none(row["ess_bulk"])}
+            for name, row in summary.iterrows()
+        },
+    }
+    return a_all[idx], b_all[idx], diagnostics
 
 
 def negative_binomial_noise(
