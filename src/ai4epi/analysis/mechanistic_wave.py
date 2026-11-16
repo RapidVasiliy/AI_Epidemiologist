@@ -387,6 +387,10 @@ def run_mechanistic_wave_analysis(
         n_trials=cfg.n_trials,
         random_seed=cfg.random_seed,
         observation_weights=holiday_weights(window["datetime"], cfg),
+        # NUTS с оцениваемой σ даёт широкое изогнутое апостериорное распределение на ранней фазе:
+        # кривая по средним параметрам может не описывать данные (СПб, 21.01.2019: R² −0.09 против
+        # 0.72 у пары с минимальной невязкой), поэтому центральная траектория — лучшая пара выборки
+        best_estimate="min_distance" if cfg.method == "nuts" else "mean",
     )
 
     trajectories, bundle = build_trajectories(
