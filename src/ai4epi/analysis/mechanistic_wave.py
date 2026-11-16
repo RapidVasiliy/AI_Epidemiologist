@@ -990,7 +990,7 @@ def run_age_group_mechanistic(
     if converged is False:
         warnings.append(
             f"MCMC: R-hat = {rhat:.2f} > {cfg.rhat_threshold}; "
-            + ("оценки параметров возрастной модели ненадёжны." if use_matrix else "оценки матрицы контактов ненадёжны.")
+            + ("оценки параметров возрастной модели ненадёжны." if (use_matrix or use_fine) else "оценки матрицы контактов ненадёжны.")
         )
     contact = model.contact(calibration.best_params) if not use_fine else np.full((2, 2), np.nan)
     block: JsonObject = {
