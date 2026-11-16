@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -171,7 +172,7 @@ class AgeGroupSeasonConfig(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_smooth_window(self) -> "AgeGroupSeasonConfig":
+    def validate_smooth_window(self) -> AgeGroupSeasonConfig:
         if self.smooth_window > 53:
             raise ValueError("smooth_window must not exceed one epidemic season.")
         return self
@@ -666,11 +667,11 @@ def plot_age_group_season_graphs(
     panel_path = out_dir / panel_filename
     n_groups = len(cfg.age_groups)
     n_cols = 2
-    n_rows = int(math.ceil(n_groups / n_cols))
+    n_rows = math.ceil(n_groups / n_cols)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 3.6 * n_rows), sharex=True)
     axes_array = np.asarray(axes).reshape(-1)
 
-    for ax, spec in zip(axes_array, cfg.age_groups):
+    for ax, spec in zip(axes_array, cfg.age_groups, strict=False):
         row = row_by_code.get(spec.age_group_code)
         if row is None:
             ax.axis("off")

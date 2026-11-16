@@ -79,3 +79,18 @@ def test_convert_and_load(tmp_path):
     row = loaded.iloc[0]
     assert row["sars_cases_age_group_1"] == 200 and row["population_age_group_3"] == 85_000
     assert row["real_cases_strain_1"] == round(5 / 50 * (1000 + 1))
+
+
+def test_convert_arbitrary_city_writes_meta(tmp_path):
+    import json
+
+    _raw_cases(8).to_excel(tmp_path / "Заб Томск.xlsx", header=False, index=False)
+    _raw_pcr(8).to_excel(tmp_path / "ПЦР Томск.xlsx", header=False, index=False)
+    convert_raw_city("tomsk", out_dir=tmp_path / "regions", cases_file=tmp_path / "Заб Томск.xlsx",
+                     pcr_file=tmp_path / "ПЦР Томск.xlsx", name_ru="Томск")
+    meta = json.loads((tmp_path / "regions" / "tomsk" / "meta.json").read_text(encoding="utf-8"))
+    assert meta == {"name_ru": "Томск", "district": "Томск"}
+    cases, _ = load_local_cases("tomsk", data_dir=tmp_path / "regions")
+    assert cases["region_name"].iloc[0] == "Томск"
+    with pytest.raises(RawFormatError):
+        convert_raw_city("tomsk", out_dir=tmp_path / "regions")

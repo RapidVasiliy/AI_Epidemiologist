@@ -31,6 +31,8 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ai4epi.analysis.br_conformal import DEFAULT_BR_CONFORMAL_PATH, conformal_band, load_br_conformal
+from ai4epi.analysis.preprocessing import is_holiday_week
 from ai4epi.core.io import TableWriteOptions, write_json, write_table
 from ai4epi.mechanistic import (
     AJELLI_LITVINOVA_3_GROUPS,
@@ -149,6 +151,17 @@ class MechanisticWaveConfig(StrictModel):
     # (шаг 7 схемы статьи), поэтому согласие не оценивается.
     agreement_skip_post_wave: bool = True
     rhat_threshold: float = Field(default=1.05, gt=1.0)
+    # Праздничные ISO-недели: регистрация систематически занижена (СПб, 1-я неделя — в
+    # среднем до 0.35 от соседних). Их вес в невязке калибровки (0 — исключить); при
+    # обнаружении начала волны значение такой недели заменяется интерполяцией соседних;
+    # если праздничная — последняя неделя, сравнение с ML идёт от значения модели.
+    holiday_iso_weeks: tuple[int, ...] = (1,)
+    holiday_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Полоса прогноза общей модели: "conformal" — по ошибкам прошлых прогнозов БР на бэктесте
+    # (таблица ``br_conformal_path``, см. ai4epi.analysis.br_conformal); "model" — 5–95 % пучка.
+    # Без таблицы используется пучок и выдаётся предупреждение.
+    br_band: Literal["conformal", "model"] = "conformal"
+    br_conformal_path: Path | None = DEFAULT_BR_CONFORMAL_PATH
     # --- бутстреп (method="bootstrap", как в RSCF_Uncertainty) ---------------
     # Число синтетических рядов (= число траекторий пучка). Полоса q05–q95:
     # "predictive" — траектории перекалиброванных параметров + шум наблюдений
@@ -265,7 +278,9 @@ def run_mechanistic_wave_analysis(
     season_label = f"{season_year}–{season_year + 1}"
     season = frame[frame["datetime"] >= season_start].reset_index(drop=True)
 
-    wave_detected, onset_date = detect_wave(season["inc_per_10k"].to_numpy(float), season["datetime"], cfg)
+    wave_detected, onset_date = detect_wave(
+        _holiday_interpolated(season["inc_per_10k"].to_numpy(float), season["datetime"], cfg), season["datetime"], cfg
+    )
     if not wave_detected:
         return MechanisticWaveRunResult(
             status="no_wave",
@@ -322,6 +337,7 @@ def run_mechanistic_wave_analysis(
         cores=cfg.cores,
         n_trials=cfg.n_trials,
         random_seed=cfg.random_seed,
+        observation_weights=holiday_weights(window["datetime"], cfg),
     )
 
     trajectories, bundle = build_trajectories(
@@ -526,11 +542,30 @@ def build_mechanistic_wave_context(
     dates = pd.to_datetime(trajectories["datetime"])
     observed = window["inc_per_10k"].to_numpy(float)
 
-    fit_r2 = r2_score_np(observed, best[:n_obs])
+    used = holiday_weights(window["datetime"], cfg) > 0
+    fit_r2 = r2_score_np(observed[used], best[:n_obs][used])
     q05 = trajectories["q05"].to_numpy(float) if "q05" in trajectories else None
     q95 = trajectories["q95"].to_numpy(float) if "q95" in trajectories else None
     phase, peak_block, wave_end = summarize_wave(best, bundle, dates, last_idx, cfg)
-    current_value = float(observed[-1])
+    current_value = float(observed[-1]) if used[-1] else float(best[last_idx])
+    if not used[-1]:
+        warnings.append(
+            "Последняя неделя — праздничная (регистрация занижена); направление прогнозов сравнивается "
+            "от значения модели на этой неделе."
+        )
+    band_type = _band_type(calibration, cfg)
+    conformal_table = load_br_conformal(cfg.br_conformal_path) if cfg.br_band == "conformal" else None
+    if cfg.br_band == "conformal" and conformal_table is None:
+        warnings.append(
+            f"Таблица конформной полосы модели БР не найдена ({cfg.br_conformal_path}); показан 5–95 % пучка траекторий, "
+            "он сильно недооценивает неопределённость."
+        )
+    if conformal_table is not None:
+        lo, hi = conformal_band(best, n_obs, conformal_table, phase, current_value)
+        q05 = np.where(np.isfinite(lo), lo, q05 if q05 is not None else np.nan)
+        q95 = np.where(np.isfinite(hi), hi, q95 if q95 is not None else np.nan)
+        trajectories["q05"], trajectories["q95"] = q05, q95
+        band_type = "conformal"
     horizons, comparison, cmp_warnings = compare_with_ml(
         current_value, best, q05, q95, dates, last_idx, ml_forecast, cfg, phase=phase
     )
@@ -571,7 +606,8 @@ def build_mechanistic_wave_context(
         "method": calibration.method,
         "method_ru": _method_ru(calibration.method),
         "n_trajectories": len(calibration.alpha_samples),
-        "band_type": _band_type(calibration, cfg),
+        "band_type": band_type,
+        "band_note": BAND_NOTES_RU.get(band_type),
         "fit_r2_in_sample": round(float(fit_r2), 3),
         "fit_r2_note": "R² рассчитан на данных калибровочного участка и характеризует описание уже наблюдаемой части волны, а не точность прогноза.",
         "phase_code": phase,
@@ -605,6 +641,20 @@ def build_mechanistic_wave_context(
         },
     }
     return block, warnings
+
+
+BAND_NOTES_RU: dict[str | None, str] = {
+    "conformal": (
+        "диапазон модели Барояна–Рвачёва построен по ошибкам её прошлых прогнозов на исторических данных "
+        "(номинально 90 % будущих наблюдений)"
+    ),
+    "predictive": "диапазон — бутстреп параметров модели с шумом наблюдений",
+    "parameter": "диапазон — бутстреп параметров модели, без шума наблюдений",
+    "posterior": (
+        "диапазон — 5–95 % пучка траекторий модели; отражает только неопределённость параметров и обычно "
+        "заметно уже реального разброса"
+    ),
+}
 
 
 def block_r_t_below_one(trajectories: pd.DataFrame, last_idx: int) -> bool:
@@ -809,19 +859,36 @@ def run_age_group_mechanistic(
         contact_matrix = np.asarray(cfg.age_contact_matrix, dtype=float)
         if cfg.age_contact_kappa_correction:
             contact_matrix = contact_matrix / np.asarray(cfg.age_underreporting_kappa, dtype=float)[None, :]
+    structure = cfg.age_contact_structure
     if use_fine:
-        detail = [f"source_population_age_group_{k}" for k in (0, 1, 2, 4, 5)]
-        if not set(detail) <= set(frames[0].columns) or frames[0][detail].iloc[0].isna().any():
-            warnings.append("нет численностей групп 0–2, 3–6, 7–14, 15–64, 65+; модель fine_5y не запущена.")
-            return None, None, None, warnings
-        pops = frames[0][detail].iloc[0].astype(float).tolist()
+        def _pops(ks: tuple[int, ...]) -> list[float] | None:
+            cols = [f"source_population_age_group_{k}" for k in ks]
+            if not set(cols) <= set(frames[0].columns):
+                return None
+            row = frames[0][cols].iloc[0]
+            return None if row.isna().any() or (row <= 0).any() else row.astype(float).tolist()
+
+        pops5 = _pops((0, 1, 2, 4, 5))
+        pops4 = _pops((0, 1, 2, 3))
+        if structure == "fine_5y" and pops5 is None and pops4 is not None:
+            warnings.append("нет численностей 15–64 и 65+; сила инфекции считается по матрице авторов 0–6 / 7–14 / 15+.")
+            structure = "authors_3g"
+        if (structure == "fine_5y" and pops5 is None) or (structure == "authors_3g" and pops4 is None):
+            warnings.append("нет численностей подгрупп 0–2, 3–6, 7–14; используется матрица 2×2 (age_contact_structure='matrix').")
+            structure, use_fine, use_matrix = "matrix", False, True
+            contact_matrix = np.asarray(cfg.age_contact_matrix, dtype=float)
+            if cfg.age_contact_kappa_correction:
+                contact_matrix = contact_matrix / np.asarray(cfg.age_underreporting_kappa, dtype=float)[None, :]
+    if use_fine:
         kappa = np.asarray(cfg.age_underreporting_kappa, dtype=float)
-        if cfg.age_contact_structure == "fine_5y":
+        if structure == "fine_5y":
+            pops = pops5
             n_fine = fine_age_populations(*pops)
             group_index = np.array([0, 0, 0] + [1] * 9)
             matrix = AJELLI_LITVINOVA_ALL_CONTACTS
         else:
-            n_fine = np.array([pops[0] + pops[1], pops[2], pops[3] + pops[4]])
+            pops = pops4
+            n_fine = np.array([pops[0] + pops[1], pops[2], pops[3]])
             group_index = np.array([0, 0, 1])
             matrix = AJELLI_LITVINOVA_3_GROUPS
         model = FineAgeContactBRModel(n_fine * kappa[group_index], group_index, contact_matrix=matrix)
@@ -850,7 +917,9 @@ def run_age_group_mechanistic(
         n_trials=cfg.n_trials,
         random_seed=cfg.random_seed,
         best_estimate=cfg.age_best_estimate,
+        observation_weights=holiday_weights(frames[0]["datetime"], cfg),
     )
+    used = holiday_weights(frames[0]["datetime"], cfg) > 0
 
     n_obs = len(frames[0])
     n_total = n_obs + cfg.projection_weeks
@@ -882,14 +951,15 @@ def run_age_group_mechanistic(
         q95 = np.percentile(band_g, 95, axis=0) if band_g is not None else None
         phase, peak, wave_end = summarize_wave(best[g], bundle_g, dates, last_idx, cfg)
         horizons, comparison, cmp_w = compare_with_ml(
-            float(obs_g[-1]), best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg, phase=phase
+            float(obs_g[-1]) if used[-1] else float(best[g][last_idx]),
+            best[g], q05, q95, dates, last_idx, ml_forecasts.get(code), cfg, phase=phase
         )
         warnings.extend(f"{code}: {w}" for w in cmp_w if "не передан" not in w)
         groups_out.append(
             {
                 "age_group_code": code,
                 "age_group_label": labels.get(code, code),
-                "fit_r2_in_sample": round(float(r2_score_np(obs_g, best[g][:n_obs])), 3),
+                "fit_r2_in_sample": round(float(r2_score_np(obs_g[used], best[g][:n_obs][used])), 3),
                 "phase_code": phase,
                 "phase_label": PHASE_LABELS_RU[phase],
                 "peak": peak,
@@ -932,7 +1002,7 @@ def run_age_group_mechanistic(
         "alpha": [round(float(a), rd + 1) for a in calibration.best_params.alpha],
         "contact_matrix": None if use_fine else [[round(float(v), rd) for v in row] for row in contact],
         "contact_scale": round(float(calibration.best_params.beta[0]), rd + 2) if use_fine else None,
-        "contact_structure": cfg.age_contact_structure,
+        "contact_structure": structure,
         "contact_matrix_note": (
             "строка — заражаемая группа, столбец — источник; структура матрицы задана внешней матрицей контактов "
             "(RSCF_Uncertainty) с поправкой на недоучёт по группам, по данным оценён только общий масштаб"
@@ -984,6 +1054,24 @@ def save_mechanistic_wave_artifacts(result: MechanisticWaveRunResult, output: Me
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def holiday_weights(dates: pd.Series, cfg: MechanisticWaveConfig) -> np.ndarray:
+    """Вес каждой недели в невязке калибровки: ``holiday_weight`` для праздничных, 1 для остальных."""
+
+    holiday = is_holiday_week(dates, cfg.holiday_iso_weeks)
+    weights = np.where(holiday, cfg.holiday_weight, 1.0)
+    return weights if weights.any() else np.ones(len(weights))
+
+
+def _holiday_interpolated(values: np.ndarray, dates: pd.Series, cfg: MechanisticWaveConfig) -> np.ndarray:
+    """Значения праздничных недель заменяются линейной интерполяцией соседних (для поиска начала волны)."""
+
+    holiday = is_holiday_week(dates, cfg.holiday_iso_weeks)
+    if not holiday.any():
+        return values
+    series = pd.Series(np.where(holiday, np.nan, values))
+    return series.interpolate(limit_direction="both").to_numpy(float)
 
 
 def _prepare_frame(influenza_weekly: pd.DataFrame, origin_date: Any) -> pd.DataFrame:

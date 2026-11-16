@@ -30,36 +30,27 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
-import time
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:  # package import
-    from ai4epi.analysis.age_group_season import (
-        AgeGroupSeasonConfig,
-        AgeGroupSeasonOutputConfig,
-        AgeGroupSeasonRunResult,
-        run_age_group_season_analysis,
-    )
-    from ai4epi.core.context import GlobalContext
     from ai4epi.analysis.age_group_forecast import (
         AgeGroupForecastConfig,
         AgeGroupForecastOutputConfig,
         AgeGroupForecastRunResult,
         run_age_group_forecast,
     )
-    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
-    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
-    from ai4epi.analysis.mechanistic_wave import (
-        MechanisticWaveConfig,
-        MechanisticWaveOutputConfig,
-        MechanisticWaveRunResult,
-        ml_forecast_from_result,
-        run_mechanistic_wave_analysis,
+    from ai4epi.analysis.age_group_season import (
+        AgeGroupSeasonConfig,
+        AgeGroupSeasonOutputConfig,
+        AgeGroupSeasonRunResult,
+        run_age_group_season_analysis,
     )
     from ai4epi.analysis.context_builders import (
         ContextBuildConfig,
@@ -67,12 +58,7 @@ try:  # package import
         ContextOutputConfig,
         build_global_context_result,
     )
-    from ai4epi.data.influenza import (
-        InfluenzaDbConfig,
-        InfluenzaFrameBundle,
-        load_influenza_weekly_from_api,
-        save_influenza_bundle,
-    )
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.epidemic_waves import (
         EpidemicWaveConfig,
         EpidemicWaveOutputConfig,
@@ -91,7 +77,13 @@ try:  # package import
         ForecastRunResult,
         run_forecast,
     )
-    from ai4epi.core.io import TableWriteOptions, write_json, write_table
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.preprocessing import (
         FeatureEngineeringConfig,
         SupervisedDataset,
@@ -103,6 +95,14 @@ try:  # package import
         normalize_weekly_frame,
         save_supervised_dataset,
     )
+    from ai4epi.core.context import GlobalContext
+    from ai4epi.core.io import TableWriteOptions, write_json, write_table
+    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.data.influenza import (
+        InfluenzaDbConfig,
+        load_influenza_weekly_from_api,
+        save_influenza_bundle,
+    )
     from ai4epi.data.weather import (
         WeatherApiConfig,
         WeatherFrameBundle,
@@ -111,27 +111,17 @@ try:  # package import
         save_weather_bundle,
     )
 except ImportError:  # pragma: no cover - compatibility with current notebook-like flat layout
-    from ai4epi.analysis.age_group_season import (  # type: ignore[no-redef]
-        AgeGroupSeasonConfig,
-        AgeGroupSeasonOutputConfig,
-        AgeGroupSeasonRunResult,
-        run_age_group_season_analysis,
-    )
-    from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
     from ai4epi.analysis.age_group_forecast import (
         AgeGroupForecastConfig,
         AgeGroupForecastOutputConfig,
         AgeGroupForecastRunResult,
         run_age_group_forecast,
     )
-    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
-    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
-    from ai4epi.analysis.mechanistic_wave import (
-        MechanisticWaveConfig,
-        MechanisticWaveOutputConfig,
-        MechanisticWaveRunResult,
-        ml_forecast_from_result,
-        run_mechanistic_wave_analysis,
+    from ai4epi.analysis.age_group_season import (  # type: ignore[no-redef]
+        AgeGroupSeasonConfig,
+        AgeGroupSeasonOutputConfig,
+        AgeGroupSeasonRunResult,
+        run_age_group_season_analysis,
     )
     from ai4epi.analysis.context_builders import (  # type: ignore[no-redef]
         ContextBuildConfig,
@@ -139,12 +129,7 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         ContextOutputConfig,
         build_global_context_result,
     )
-    from ai4epi.data.influenza import (  # type: ignore[no-redef]
-        InfluenzaDbConfig,
-        InfluenzaFrameBundle,
-        load_influenza_weekly_from_api,
-        save_influenza_bundle,
-    )
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.epidemic_waves import (  # type: ignore[no-redef]
         EpidemicWaveConfig,
         EpidemicWaveOutputConfig,
@@ -163,7 +148,13 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         ForecastRunResult,
         run_forecast,
     )
-    from ai4epi.core.io import TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.preprocessing import (  # type: ignore[no-redef]
         FeatureEngineeringConfig,
         SupervisedDataset,
@@ -174,6 +165,14 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         merge_weekly_influenza_weather,
         normalize_weekly_frame,
         save_supervised_dataset,
+    )
+    from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
+    from ai4epi.core.io import TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
+    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.data.influenza import (  # type: ignore[no-redef]
+        InfluenzaDbConfig,
+        load_influenza_weekly_from_api,
+        save_influenza_bundle,
     )
     from ai4epi.data.weather import (  # type: ignore[no-redef]
         WeatherApiConfig,
@@ -233,7 +232,7 @@ class AnalysisPipelineSettings(StrictModel):
     save_intermediate_tables: bool = True
 
     @model_validator(mode="after")
-    def validate_context_dependencies(self) -> "AnalysisPipelineSettings":
+    def validate_context_dependencies(self) -> AnalysisPipelineSettings:
         if self.build_context and not self.run_explainability:
             raise ValueError("build_context=True требует run_explainability=True.")
         if self.build_context and not self.run_epidemic_waves:
@@ -353,7 +352,7 @@ class AnalysisSourceConfig(StrictModel):
     weather_timezone: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def validate_weather_coordinates(self) -> "AnalysisSourceConfig":
+    def validate_weather_coordinates(self) -> AnalysisSourceConfig:
         provided = [self.weather_latitude is not None, self.weather_longitude is not None, self.weather_timezone is not None]
         if any(provided) and not all(provided):
             raise ValueError("weather_latitude, weather_longitude и weather_timezone должны задаваться совместно.")
@@ -877,15 +876,15 @@ def _infer_analysis_status(
 
 
 __all__ = [
+    "AnalysisOutputConfig",
     "AnalysisPipelineError",
     "AnalysisPipelineInputError",
     "AnalysisPipelineSettings",
-    "AnalysisOutputConfig",
-    "AnalysisSourceConfig",
     "AnalysisRunResult",
+    "AnalysisSourceConfig",
     "prepare_analysis_weekly_frame",
     "run_analysis_pipeline",
-    "run_analysis_pipeline_from_sources",
     "run_analysis_pipeline_from_source_params",
+    "run_analysis_pipeline_from_sources",
 ]
 

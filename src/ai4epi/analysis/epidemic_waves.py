@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 JsonObject = dict[str, Any]
 WaveStatus = Literal["complete", "left_censored", "right_censored", "both_censored"]
@@ -75,7 +75,7 @@ class EpidemicWaveConfig(StrictModel):
     include_plot_points: bool = True
 
     @model_validator(mode="after")
-    def validate_smoothing_window(self) -> "EpidemicWaveConfig":
+    def validate_smoothing_window(self) -> EpidemicWaveConfig:
         if self.smooth_window > 53:
             raise ValueError("smooth_window must not exceed one epidemic season.")
         return self
@@ -349,7 +349,7 @@ def extract_one_wave_record(season_df: pd.DataFrame, *, config: EpidemicWaveConf
         "season_label": str(season_df["season_label"].iloc[0]),
         "wave_status": wave_status,
         "observed_until": pd.Timestamp(season_df["date"].max()).date().isoformat(),
-        "n_observed_weeks": int(len(season_df)),
+        "n_observed_weeks": len(season_df),
         "peak_week": int(season_df.loc[peak_idx, "iso_week"]),
         "peak_date": pd.Timestamp(season_df.loc[peak_idx, "date"]).date().isoformat(),
         "peak_value": _round_float(peak_y, cfg.round_digits),

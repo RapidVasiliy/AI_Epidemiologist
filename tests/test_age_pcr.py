@@ -74,3 +74,33 @@ def test_national_export_for_spb(data_dir):
     cases, _ = load_local_cases("spb", data_dir=data_dir, end_date="2018-06-01")
     assert cases["age_pcr_tested_3"].notna().sum() > 30
     assert load_age_pcr("unknown_city") is None
+
+
+def test_multiple_exports_and_city_meta(tmp_path):
+    from ai4epi.data.age_pcr import load_age_pcr
+
+    def export(year, weeks, positive):
+        rows = []
+        for w in weeks:
+            row = {"district": "Томск", "iso_year": year, "iso_week": w}
+            for g in ["0_2", "3_6", "7_14", "15", "total"]:
+                row[f"tested_{g}"] = 10.0
+                row[f"positive_{g}"] = positive
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    export(2019, [1, 2], 1.0).to_csv(tmp_path / "age_pcr_2018w40_2019w39.csv", index=False)
+    export(2019, [2, 3], 5.0).to_csv(tmp_path / "age_pcr_2019w02_2019w52.csv", index=False)
+    pcr = load_age_pcr("tomsk", path=tmp_path, district="Томск")
+    assert len(pcr) == 3
+    assert pcr["positive_15"].tolist() == [1.0, 5.0, 5.0]  # повтор недели — из файла, идущего позже
+    assert load_age_pcr("tomsk", path=tmp_path) is None  # без district город не сопоставить
+
+
+def test_city_meta_overrides(tmp_path):
+    from ai4epi.data.local_excel import city_meta
+
+    assert city_meta("spb", tmp_path)["district"] == "Санкт-Петербург"
+    (tmp_path / "tomsk").mkdir()
+    (tmp_path / "tomsk" / "meta.json").write_text('{"name_ru": "Томск"}', encoding="utf-8")
+    assert city_meta("tomsk", tmp_path) == {"name_ru": "Томск", "district": "Томск"}

@@ -13,14 +13,15 @@ import copy
 import json
 import re
 import time
+from collections.abc import Mapping, MutableMapping, Sequence
 from pathlib import Path
-from collections.abc import MutableMapping
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ai4epi.generation.bulletin import Bulletin, build_bulletin_metadata, load_bulletin, save_bulletin
 from ai4epi.core.context import GlobalContext, load_global_context
+from ai4epi.core.sections import SectionConfig, SectionRegistry, default_section_registry
+from ai4epi.generation.bulletin import Bulletin, build_bulletin_metadata, load_bulletin, save_bulletin
 from ai4epi.generation.narrator import (
     ChatBackend,
     LLMResponseValidationError,
@@ -28,8 +29,6 @@ from ai4epi.generation.narrator import (
     validate_llm_payload,
 )
 from ai4epi.quality.runtime_checks import RuntimeChecker
-from ai4epi.core.sections import SectionConfig, SectionRegistry, default_section_registry
-
 
 JsonObject = dict[str, Any]
 TextPathSegment = str | int
@@ -45,7 +44,7 @@ class EditorError(RuntimeError):
 class EditorContractError(EditorError):
     """Редакторская правка нарушила контракт сохранения фактов или схемы."""
 
-    def __init__(self, message: str, *, trace: "EditorFieldTrace | None" = None) -> None:
+    def __init__(self, message: str, *, trace: EditorFieldTrace | None = None) -> None:
         super().__init__(message)
         self.trace = trace
 
@@ -102,7 +101,7 @@ class EditorRunResult(StrictModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def infer_status_consistency(self) -> "EditorRunResult":
+    def infer_status_consistency(self) -> EditorRunResult:
         if self.status == "ok" and self.errors:
             object.__setattr__(self, "status", "partial")
         if self.status == "failed" and not self.errors:
@@ -838,16 +837,12 @@ def set_text_path(target: Any, path: TextPath, value: str) -> None:
         raise ValueError("Cannot set value at empty path.")
     current = target
     for segment in path[:-1]:
-        if isinstance(current, list) and isinstance(segment, int):
-            current = current[segment]
-        elif isinstance(current, MutableMapping) and isinstance(segment, str):
+        if (isinstance(current, list) and isinstance(segment, int)) or (isinstance(current, MutableMapping) and isinstance(segment, str)):
             current = current[segment]
         else:
             raise TypeError(f"Cannot traverse segment {segment!r} in path {path!r}.")
     leaf = path[-1]
-    if isinstance(current, list) and isinstance(leaf, int):
-        current[leaf] = value
-    elif isinstance(current, MutableMapping) and isinstance(leaf, str):
+    if (isinstance(current, list) and isinstance(leaf, int)) or (isinstance(current, MutableMapping) and isinstance(leaf, str)):
         current[leaf] = value
     else:
         raise TypeError(f"Cannot set leaf {leaf!r} in path {path!r}.")

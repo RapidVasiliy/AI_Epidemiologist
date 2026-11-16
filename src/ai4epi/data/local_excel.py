@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -26,7 +27,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
-from ai4epi.data.age_pcr import DEFAULT_AGE_PCR_PATH, attach_age_pcr, load_age_pcr
+from ai4epi.data.age_pcr import CITY_TO_DISTRICT, attach_age_pcr, load_age_pcr
 from ai4epi.data.influenza import (
     INFLUENZA_CASES_SCHEMA,
     STRAIN_NAMES,
@@ -90,6 +91,23 @@ class LocalInfluenzaBundle:
     pcr_gap_policy: str
 
 
+def city_meta(city: str, data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR) -> dict[str, str]:
+    """Описание города: ``<data_dir>/<city>/meta.json`` (``name_ru``, ``district``) поверх встроенных значений.
+
+    ``district`` — название города в общероссийских выгрузках (``DISTRICT_NAME``), по нему
+    подключается возрастная ПЦР. Для нового города достаточно положить meta.json рядом с xlsx.
+    """
+
+    meta = {"name_ru": LOCAL_CITY_NAMES_RU.get(city, city)}
+    if city in CITY_TO_DISTRICT:
+        meta["district"] = CITY_TO_DISTRICT[city]
+    path = Path(data_dir) / city / "meta.json"
+    if path.is_file():
+        meta.update({k: str(v) for k, v in json.loads(path.read_text(encoding="utf-8")).items()})
+    meta.setdefault("district", meta["name_ru"])
+    return meta
+
+
 def list_local_cities(data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR) -> list[str]:
     """Вернуть города, для которых в ``data_dir`` есть пара cases/pcr."""
 
@@ -139,7 +157,7 @@ def load_local_cases(
     В обоих режимах отбрасываются последние недели без ПЦР (неполная выгрузка).
     Если для города есть ПЦР по возрастам (``age_pcr_path``, см. ``ai4epi.data.age_pcr``),
     к таблице добавляются столбцы ``age_pcr_tested_k`` / ``age_pcr_positive_k``; ``"auto"`` —
-    файл ``<data_dir>/../national/<имя DEFAULT_AGE_PCR_PATH>``, ``None`` — не добавлять.
+    все ``age_pcr_*.csv`` каталога ``<data_dir>/../national``, ``None`` — не добавлять.
     ``end_date`` обрезает ряд *до* обработки пропусков: интерполяция не
     использует данные ПЦР недель после ``end_date`` (состояние «как было
     известно на дату», без заглядывания вперёд).
@@ -162,7 +180,8 @@ def load_local_cases(
     cases = pd.DataFrame({"datetime": raw_cases["Дата"].map(week_start_from_label)})
     for source, target in CASES_COLUMNS.items():
         cases[target] = pd.to_numeric(raw_cases[source], errors="coerce") if source in raw_cases else float("nan")
-    city_name = LOCAL_CITY_NAMES_RU.get(city, city)
+    meta = city_meta(city, data_dir)
+    city_name = meta["name_ru"]
     cases.insert(1, "region_name", city_name)
     cases.insert(2, "district_name", city_name)
 
@@ -201,9 +220,9 @@ def load_local_cases(
     merged = merged.drop(columns=["tested_total", *[f"tested_strain_{i}" for i in STRAIN_NAMES]])
     merged = merged.reset_index(drop=True)
     if age_pcr_path == "auto":
-        age_pcr_path = Path(data_dir).parent / "national" / DEFAULT_AGE_PCR_PATH.name
+        age_pcr_path = Path(data_dir).parent / "national"
     if age_pcr_path is not None:
-        merged = attach_age_pcr(merged, load_age_pcr(city, path=age_pcr_path))
+        merged = attach_age_pcr(merged, load_age_pcr(city, path=age_pcr_path, district=meta["district"]))
     INFLUENZA_CASES_SCHEMA.validate_dataframe(merged, name="influenza_cases")
     return merged, dropped
 
@@ -234,7 +253,7 @@ def load_local_influenza(
     has_split = bool(cases[["sars_cases_age_group_4", "sars_cases_age_group_5"]].notna().any().all())
     return LocalInfluenzaBundle(
         city=city,
-        city_name_ru=LOCAL_CITY_NAMES_RU.get(city, city),
+        city_name_ru=city_meta(city, data_dir)["name_ru"],
         cases=cases,
         weekly=weekly,
         source_dir=Path(data_dir) / city,
@@ -251,6 +270,7 @@ __all__ = [
     "LocalDataError",
     "LocalInfluenzaBundle",
     "PcrGapPolicy",
+    "city_meta",
     "list_local_cities",
     "load_local_cases",
     "load_local_influenza",

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -151,20 +152,31 @@ def _dedupe(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 def convert_raw_city(
     city: str,
     *,
-    raw_dir: str | Path,
+    raw_dir: str | Path | None = None,
     out_dir: str | Path,
     start_year: int = 2010,
+    cases_file: str | Path | None = None,
+    pcr_file: str | Path | None = None,
+    name_ru: str | None = None,
+    district: str | None = None,
 ) -> ConversionReport:
-    """Сконвертировать сырые xlsx города в ``<out_dir>/<city>/{cases,pcr}.xlsx``.
+    """Сконвертировать сырые xlsx города в ``<out_dir>/<city>/{cases,pcr}.xlsx`` и ``meta.json``.
 
-    Ряд ОРВИ обрезается с ``start_year`` (ПЦР в выгрузках начинается с 2010 г.).
-    При повторе недели остаётся последняя строка.
+    Город из ``RAW_CITIES`` — по ``raw_dir``; любой другой — по явным ``cases_file`` и ``pcr_file``
+    (тот же формат). ``name_ru`` — название для отчёта, ``district`` — название города в
+    общероссийской выгрузке ПЦР (по умолчанию ``name_ru``). Ряд ОРВИ обрезается с ``start_year``
+    (ПЦР в выгрузках начинается с 2010 г.). При повторе недели остаётся последняя строка.
     """
 
-    spec = RAW_CITIES[city]
-    raw_dir = Path(raw_dir)
-    cases = read_raw_cases(raw_dir / spec.cases_file)
-    pcr = read_raw_pcr(raw_dir / spec.pcr_file)
+    spec = RAW_CITIES.get(city)
+    if cases_file is None or pcr_file is None:
+        if spec is None or raw_dir is None:
+            raise RawFormatError(f"Для города {city!r} нужны cases_file и pcr_file (или raw_dir для {sorted(RAW_CITIES)}).")
+        cases_file = Path(raw_dir) / spec.cases_file
+        pcr_file = Path(raw_dir) / spec.pcr_file
+    name_ru = name_ru or (spec.name_ru if spec else city)
+    cases = read_raw_cases(cases_file)
+    pcr = read_raw_pcr(pcr_file)
     cases, dup_c = _dedupe(cases)
     pcr, dup_p = _dedupe(pcr)
     starts = cases["Дата"].map(week_start_from_label)
@@ -173,6 +185,8 @@ def convert_raw_city(
     target.mkdir(parents=True, exist_ok=True)
     cases.to_excel(target / "cases.xlsx", index=False)
     pcr.to_excel(target / "pcr.xlsx", index=False)
+    meta = {"name_ru": name_ru, "district": district or name_ru}
+    (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     pcr_starts = set(pcr["Дата"].map(week_start_from_label))
     tested = pcr.set_index(pcr["Дата"].map(week_start_from_label))[PCR_TESTED_COLUMN]
     missing = sum(

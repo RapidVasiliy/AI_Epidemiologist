@@ -23,9 +23,10 @@ SHAP-значения считаются для eval-моделей на test-в
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from ai4epi.analysis.forecasting import ForecastRunResult, get_target_transform
 from ai4epi.analysis.preprocessing import FeatureColumnGroups, infer_feature_column_groups
-
 
 JsonObject = dict[str, Any]
 ExplainerKind = Literal["tree", "permutation"]
@@ -145,7 +145,7 @@ class ExplainabilityOutputConfig(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_at_least_one_output(self) -> "ExplainabilityOutputConfig":
+    def validate_at_least_one_output(self) -> ExplainabilityOutputConfig:
         if not any(
             (
                 self.save_global_importance,

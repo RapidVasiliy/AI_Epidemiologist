@@ -23,9 +23,10 @@ rolling-окна цели 4..9, rolling-окна температуры 4..7, Fo
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,6 @@ from pandas.api.types import is_numeric_dtype
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai4epi.core.io import TableSchema, TableWriteOptions, write_table
-
 
 CalendarValidationMode = Literal["strict", "repair", "ignore"]
 
@@ -111,6 +111,11 @@ class FeatureEngineeringConfig(StrictModel):
     fourier_k: int = Field(default=2, ge=0, le=12)
     fourier_period: int = Field(default=52, ge=1)
     growth_lags: tuple[int, ...] = (1, 2, 4)
+    # Праздничные недели (регистрация систематически занижена, в СПб на 1-й ISO-неделе —
+    # в среднем до 0.35 от соседних): признаки holiday_lag_pos (на каком лаге текущей
+    # недели праздничная неделя, −1 — нет) и holiday_ahead_pos (на каком горизонте, 0 — нет).
+    holiday_features: bool = True
+    holiday_iso_weeks: tuple[int, ...] = (1,)
     epidemic_dynamics_eps: float = Field(default=1e-6, gt=0)
     raw_columns_to_drop: tuple[str, ...] = (
         "total_population",
@@ -143,7 +148,7 @@ class FeatureEngineeringConfig(StrictModel):
         return tuple(int(v) for v in value)
 
     @model_validator(mode="after")
-    def _validate_windows(self) -> "FeatureEngineeringConfig":
+    def _validate_windows(self) -> FeatureEngineeringConfig:
         if any(w <= 0 for w in self.y_roll_windows):
             raise ValueError("Окна rolling-статистик цели должны быть положительными.")
         if any(w <= 0 for w in self.temp_roll_windows):
@@ -570,6 +575,40 @@ def add_epidemic_dynamics_features(
     return out
 
 
+def is_holiday_week(dates: pd.Series | pd.DatetimeIndex, holiday_iso_weeks: Sequence[int] = (1,)) -> np.ndarray:
+    """Флаг праздничной недели по ISO-номеру недели даты."""
+
+    weeks = pd.DatetimeIndex(pd.to_datetime(dates)).isocalendar().week.to_numpy(int)
+    return np.isin(weeks, np.asarray(holiday_iso_weeks, dtype=int))
+
+
+def add_holiday_features(
+    data: pd.DataFrame,
+    *,
+    datetime_col: str = "datetime",
+    holiday_iso_weeks: Sequence[int] = (1,),
+    max_lag: int = 5,
+    horizons: int = 4,
+) -> pd.DataFrame:
+    """Признаки праздничных недель по календарю (без заглядывания в данные будущего).
+
+    ``holiday_lag_pos`` — k ∈ [0, max_lag], если неделя t−k праздничная (наименьшее k), иначе −1;
+    ``holiday_ahead_pos`` — h ∈ [1, horizons], если неделя t+h праздничная (наименьшее h), иначе 0.
+    """
+
+    out = data.copy()
+    when = pd.to_datetime(out[datetime_col])
+    lag = np.full(len(out), -1)
+    for k in range(max_lag, -1, -1):
+        lag = np.where(is_holiday_week(when - pd.Timedelta(weeks=k), holiday_iso_weeks), k, lag)
+    ahead = np.zeros(len(out), dtype=int)
+    for h in range(horizons, 0, -1):
+        ahead = np.where(is_holiday_week(when + pd.Timedelta(weeks=h), holiday_iso_weeks), h, ahead)
+    out["holiday_lag_pos"] = lag
+    out["holiday_ahead_pos"] = ahead
+    return out
+
+
 def build_supervised(
     df: pd.DataFrame,
     *,
@@ -619,6 +658,15 @@ def build_supervised(
         growth_lags=cfg.growth_lags,
         eps=cfg.epidemic_dynamics_eps,
     )
+
+    if cfg.holiday_features:
+        data = add_holiday_features(
+            data,
+            datetime_col=cfg.datetime_col,
+            holiday_iso_weeks=cfg.holiday_iso_weeks,
+            max_lag=max(cfg.y_lags) if cfg.y_lags else 0,
+            horizons=cfg.horizons,
+        )
 
     for temp_col in cfg.temp_cols:
         data = make_lag_features(data, temp_col, cfg.temp_lags, prefix=temp_col)
@@ -720,7 +768,11 @@ def infer_feature_column_groups(
     """Разложить признаки по группам для отчётности и explainability."""
 
     features = tuple(feature_cols)
-    calendar = tuple(c for c in features if c in {"iso_year", "iso_week"} or c.startswith("sin_w") or c.startswith("cos_w"))
+    calendar = tuple(
+        c
+        for c in features
+        if c in {"iso_year", "iso_week"} or c.startswith(("sin_w", "cos_w", "holiday_"))
+    )
     target_lags = tuple(c for c in features if c.startswith("y_lag"))
     target_rolling = tuple(c for c in features if c.startswith("y_roll"))
     target_dynamics = tuple(c for c in features if c.startswith("y_diff") or c == "y_accel")
@@ -833,31 +885,31 @@ def _validate_unique_non_negative_names(values: tuple[str, ...], *, field_name: 
 
 
 __all__ = [
+    "WEATHER_WEEKLY_SCHEMA",
+    "WEEKLY_MODEL_INPUT_SCHEMA",
     "CalendarValidationMode",
-    "PreprocessingError",
-    "WeeklyFrameError",
-    "FeatureEngineeringError",
-    "PreprocessingConfigError",
-    "WeeklyFrameConfig",
-    "WeatherAggregationConfig",
+    "FeatureColumnGroups",
     "FeatureEngineeringConfig",
+    "FeatureEngineeringError",
     "HoldoutSplitConfig",
+    "PreprocessingConfigError",
+    "PreprocessingError",
     "SupervisedDataset",
     "TimeHoldoutSplit",
-    "FeatureColumnGroups",
-    "WEEKLY_MODEL_INPUT_SCHEMA",
-    "WEATHER_WEEKLY_SCHEMA",
-    "normalize_weekly_frame",
-    "aggregate_hourly_weather_to_weekly",
-    "merge_weekly_influenza_weather",
+    "WeatherAggregationConfig",
+    "WeeklyFrameConfig",
+    "WeeklyFrameError",
+    "add_epidemic_dynamics_features",
     "add_fourier_week_features",
+    "aggregate_hourly_weather_to_weekly",
+    "build_supervised",
+    "infer_feature_column_groups",
     "make_lag_features",
     "make_rolling_features",
-    "add_epidemic_dynamics_features",
-    "build_supervised",
     "make_time_holdout_split",
-    "infer_feature_column_groups",
-    "supervised_to_feature_list_frame",
+    "merge_weekly_influenza_weather",
+    "normalize_weekly_frame",
     "save_supervised_dataset",
+    "supervised_to_feature_list_frame",
 ]
 

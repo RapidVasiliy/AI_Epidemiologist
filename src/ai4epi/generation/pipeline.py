@@ -21,18 +21,20 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ai4epi.core.context import GlobalContext, load_global_context
+from ai4epi.core.sections import SectionRegistry, default_section_registry, load_section_registry
 from ai4epi.generation.bulletin import (
     Bulletin,
     BulletinBuilder,
     save_bulletin,
     save_bulletin_markdown,
 )
-from ai4epi.core.context import GlobalContext, load_global_context
 from ai4epi.generation.editor import BulletinEditor, EditorRunResult, EditorSettings
 from ai4epi.generation.narrator import (
     ChatBackend,
@@ -42,8 +44,6 @@ from ai4epi.generation.narrator import (
     make_chat_backend,
 )
 from ai4epi.quality.runtime_checks import RuntimeChecker
-from ai4epi.core.sections import SectionRegistry, default_section_registry, load_section_registry
-
 
 JsonObject = dict[str, Any]
 PipelineStatus = Literal["ok", "partial", "failed"]
@@ -148,7 +148,7 @@ class PipelineOutputConfig(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_at_least_one_output(self) -> "PipelineOutputConfig":
+    def validate_at_least_one_output(self) -> PipelineOutputConfig:
         if not any(
             (
                 self.save_base_bulletin_json,

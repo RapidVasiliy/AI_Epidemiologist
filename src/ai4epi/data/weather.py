@@ -15,10 +15,11 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
-import re
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -29,11 +30,11 @@ except ImportError:  # pragma: no cover - проверяется при реал
     requests = None  # type: ignore[assignment]
 
 try:  # Поддержка пакетного импорта.
-    from ai4epi.core.io import TableSchema, TableWriteOptions, write_json, write_table
     from ai4epi.analysis.preprocessing import WeatherAggregationConfig, aggregate_hourly_weather_to_weekly
+    from ai4epi.core.io import TableSchema, TableWriteOptions, write_json, write_table
 except ImportError:  # pragma: no cover - поддержка запуска отдельных файлов в текущем исследовательском каталоге.
-    from ai4epi.core.io import TableSchema, TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
     from ai4epi.analysis.preprocessing import WeatherAggregationConfig, aggregate_hourly_weather_to_weekly  # type: ignore[no-redef]
+    from ai4epi.core.io import TableSchema, TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
 
 
 JsonObject = dict[str, Any]
@@ -113,12 +114,12 @@ class WeatherFetchRequest(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_interval(self) -> "WeatherFetchRequest":
+    def validate_interval(self) -> WeatherFetchRequest:
         if self.end_date < self.start_date:
             raise ValueError("end_date не может быть раньше start_date.")
-        if any(value is not None for value in (self.latitude, self.longitude, self.timezone)):
-            if self.latitude is None or self.longitude is None or self.timezone is None:
-                raise ValueError("latitude, longitude и timezone должны задаваться совместно.")
+        coords = (self.latitude, self.longitude, self.timezone)
+        if any(value is not None for value in coords) and any(value is None for value in coords):
+            raise ValueError("latitude, longitude и timezone должны задаваться совместно.")
         return self
 
 

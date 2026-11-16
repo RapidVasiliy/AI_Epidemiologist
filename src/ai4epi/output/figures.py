@@ -23,8 +23,9 @@ bulletin. This module is responsible only for making the images themselves.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -281,6 +282,7 @@ def _plot_mechanistic_wave(
     else:
         fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
     band_label = {
+        "conformal": "Модель БР: 90% по ошибкам прошлых прогнозов",
         "predictive": "Модель БР: 5–95% (бутстреп, с шумом наблюдений)",
         "parameter": "Модель БР: 5–95% (бутстреп параметров)",
     }.get(str(block.get("band_type")), "Модель БР: 5–95% пучка")
@@ -442,7 +444,6 @@ def _plot_forecast_like_notebook(
 
     y_hat = forecast_rows["value"].to_numpy(dtype=float)
     future_dates = pd.DatetimeIndex(forecast_rows["date"])
-    origin_date = pd.Timestamp(history["date"].max())
 
     y_lo: np.ndarray | None = None
     y_hi: np.ndarray | None = None
@@ -601,7 +602,7 @@ def _plot_epidemic_wave_comparison_like_notebook(
                         color=color,
                         ha="center",
                         va="bottom",
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7),
+                        bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": color, "alpha": 0.7},
                     )
             else:
                 fwhm_lb = wave.get("fwhm_lower_bound_weeks")
@@ -614,7 +615,7 @@ def _plot_epidemic_wave_comparison_like_notebook(
                         color=color,
                         ha="right",
                         va="bottom",
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7),
+                        bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": color, "alpha": 0.7},
                     )
 
     if not plotted:
@@ -714,7 +715,7 @@ def _plot_age_group_season_panels_like_notebook(
     flat_axes = axes.flatten()
 
     plotted_any = False
-    for ax, code in zip(flat_axes, codes):
+    for ax, code in zip(flat_axes, codes, strict=False):
         row = row_by_code.get(code)
         group = points[points["age_group_code"].astype(str).eq(code)].copy()
         if row is None or group.empty:

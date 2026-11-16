@@ -121,6 +121,7 @@ def calibrate(
     n_trials: int = 1000,
     random_seed: int | None = 42,
     best_estimate: Literal["mean", "min_distance"] = "mean",
+    observation_weights: Sequence[float] | np.ndarray | None = None,
 ) -> CalibrationResult:
     """Откалибровать ``model`` по наблюдаемому ряду ``observed``.
 
@@ -134,6 +135,10 @@ def calibrate(
     исходном коде; ``"min_distance"`` — пара из выборки с наименьшей невязкой
     (устойчивее при многомодальном или несошедшемся апостериорном распределении,
     например для возрастной модели с шестью параметрами).
+
+    ``observation_weights`` — вес каждого шага ряда (длина ``n_steps``, общая для всех групп,
+    или полная длина ряда): невязка шага умножается на ``sqrt(w)``; вес 0 исключает шаг
+    (например, праздничную неделю с систематически заниженной регистрацией).
     """
 
     if method not in CALIBRATION_METHODS:
@@ -146,11 +151,23 @@ def calibrate(
         raise CalibrationError("Длина ряда не делится на число групп модели.")
     n_steps = len(data) // alpha_dim
     scale_per_group = np.broadcast_to(np.asarray(observation_scale, dtype=float), (alpha_dim,))
-    scale = np.repeat(scale_per_group, n_steps)
+    base_scale = np.repeat(scale_per_group, n_steps)
+    weights = np.ones(len(data))
+    if observation_weights is not None:
+        w = np.asarray(observation_weights, dtype=float).reshape(-1)
+        if len(w) == n_steps:
+            w = np.tile(w, alpha_dim)
+        if len(w) != len(data) or np.any(w < 0) or not np.any(w > 0):
+            raise CalibrationError("observation_weights: неверная длина, отрицательные веса или все веса нулевые.")
+        weights = w
+    scale = base_scale * np.sqrt(weights)
     scaled = data * scale
 
+    def raw_observable(alpha: Sequence[float], beta: Sequence[float]) -> np.ndarray:
+        return model_observable(model, template.with_values(alpha, beta), n_steps, time_step=time_step)
+
     def observable(alpha: Sequence[float], beta: Sequence[float]) -> np.ndarray:
-        return model_observable(model, template.with_values(alpha, beta), n_steps, time_step=time_step) * scale
+        return raw_observable(alpha, beta) * scale
 
     if method in ("mcmc", "abc"):
         alpha_s, beta_s, diagnostics = _bayesian(
@@ -190,8 +207,10 @@ def calibrate(
     if method == "bootstrap":
         x, alpha_s, beta_s, diagnostics = _bootstrap(
             observable,
+            raw_observable,
             data,
             scale,
+            weights > 0,
             alpha_dim=alpha_dim,
             beta_dim=beta_dim,
             n_replicates=n_samples,
@@ -262,7 +281,7 @@ def _bayesian(
 
     width = max(alpha_dim, beta_dim)
 
-    def simulator(rng, alpha, beta, size=None):  # noqa: ARG001 - сигнатура pm.Simulator
+    def simulator(rng, alpha, beta, size=None):
         return observable(np.asarray(alpha)[:alpha_dim], np.asarray(beta)[:beta_dim])
 
     with pm.Model():
@@ -331,7 +350,7 @@ def _optuna(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, alp
     return x, float(study.best_value)
 
 
-def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, alpha_upper, beta_upper):  # noqa: ARG001
+def _annealing(observable, data, *, alpha_dim, beta_dim, n_trials, random_seed, alpha_upper, beta_upper):
     from scipy.optimize import dual_annealing
 
     def loss(x):
@@ -367,8 +386,10 @@ def negative_binomial_noise(
 
 def _bootstrap(
     observable,
+    raw_observable,
     data: np.ndarray,
     scale: np.ndarray,
+    used: np.ndarray,
     *,
     alpha_dim: int,
     beta_dim: int,
@@ -387,10 +408,13 @@ def _bootstrap(
 
     point = dual_annealing(sse, bounds=bounds, args=(scaled,), seed=random_seed, maxiter=300)
     x0 = np.asarray(point.x, dtype=float)
-    fitted = observable(x0[:alpha_dim], x0[alpha_dim:]) / scale  # в отсчётах
+    fitted = raw_observable(x0[:alpha_dim], x0[alpha_dim:])  # в отсчётах
     n_steps = len(data) // alpha_dim
     resid = (data - fitted).reshape(alpha_dim, n_steps)
-    variance_g = resid.var(axis=1, ddof=min(1, n_steps - 1))
+    mask = used.reshape(alpha_dim, n_steps)
+    variance_g = np.array(
+        [r[m].var(ddof=min(1, int(m.sum()) - 1)) if m.sum() > 1 else 0.0 for r, m in zip(resid, mask, strict=True)]
+    )
     variance = np.repeat(variance_g, n_steps)
 
     rng = np.random.default_rng(random_seed)

@@ -8,7 +8,9 @@ A без подтипа (``A_*``), A(H1N1)pdm09 (``PDM_*``), A(H3N2) (``H3_*``),
 A(H1) (``H1_*``) в группах 0–2, 3–6, 7–14 и 15+ лет.
 
 В проект выгрузка сведена в компактный CSV (``data/national/age_pcr_2017w40_2018w39.csv``,
-функция :func:`extract_age_pcr`): суммы по учреждениям города за неделю.
+функция :func:`extract_age_pcr`): суммы по учреждениям города за неделю. Выгрузки других сезонов в
+том же формате добавляются скриптом ``scripts/convert_age_pcr_export.py``; загружаются все файлы
+``age_pcr_*.csv`` каталога (при повторе недели берётся файл, идущий позже по имени).
 
 Зачем: доля положительных сильно зависит от возраста (за сезон по всем городам 0–2 года —
 0.09, 15+ — 0.21), а возрастные ряды по умолчанию строятся в допущении одинаковой доли
@@ -61,19 +63,34 @@ def extract_age_pcr(xlsx_path: str | Path) -> pd.DataFrame:
     return out.sort_values(["district", "iso_year", "iso_week"]).reset_index(drop=True)
 
 
+def age_pcr_files(path: str | Path) -> list[Path]:
+    """Файл или все ``age_pcr_*.csv`` каталога (по имени)."""
+
+    p = Path(path)
+    if p.is_dir():
+        return sorted(p.glob("age_pcr_*.csv"))
+    return [p] if p.is_file() else []
+
+
 def load_age_pcr(
     city: str,
     *,
-    path: str | Path = DEFAULT_AGE_PCR_PATH,
+    path: str | Path = DEFAULT_AGE_PCR_PATH.parent,
+    district: str | None = None,
 ) -> pd.DataFrame | None:
-    """Возрастная ПЦР города, индексированная датой начала ISO-недели; ``None``, если её нет."""
+    """Возрастная ПЦР города, индексированная датой начала ISO-недели; ``None``, если её нет.
 
-    district = CITY_TO_DISTRICT.get(city)
-    path = Path(path)
-    if district is None or not path.is_file():
+    ``path`` — CSV или каталог с ``age_pcr_*.csv``; ``district`` — название города в выгрузке
+    (``DISTRICT_NAME``), по умолчанию из ``CITY_TO_DISTRICT``.
+    """
+
+    district = district or CITY_TO_DISTRICT.get(city)
+    files = age_pcr_files(path)
+    if district is None or not files:
         return None
-    table = pd.read_csv(path)
+    table = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
     table = table[table["district"] == district]
+    table = table.drop_duplicates(["iso_year", "iso_week"], keep="last")
     if table.empty:
         return None
     starts = [
@@ -115,6 +132,7 @@ __all__ = [
     "AGE_PCR_GROUPS",
     "CITY_TO_DISTRICT",
     "DEFAULT_AGE_PCR_PATH",
+    "age_pcr_files",
     "attach_age_pcr",
     "extract_age_pcr",
     "load_age_pcr",

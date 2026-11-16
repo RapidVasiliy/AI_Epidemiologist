@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable, Mapping, Sequence
 from enum import Enum
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ai4epi.core.context import GlobalContext
 from ai4epi.core.sections import SectionRegistry
-
 
 JsonObject = dict[str, Any]
 

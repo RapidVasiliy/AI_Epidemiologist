@@ -10,17 +10,17 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai4epi.core.context import GlobalContext
-from ai4epi.generation.narrator import LLMResponseValidationError, SectionNarrationResult, validate_llm_payload
-from ai4epi.quality.runtime_checks import RuntimeCheckReport, RuntimeChecker
 from ai4epi.core.sections import SectionConfig, SectionRegistry, default_section_registry
-
+from ai4epi.generation.narrator import LLMResponseValidationError, SectionNarrationResult, validate_llm_payload
+from ai4epi.quality.runtime_checks import RuntimeChecker, RuntimeCheckReport
 
 JsonObject = dict[str, Any]
 BulletinStatus = Literal["draft", "checked", "failed"]
@@ -45,7 +45,7 @@ class BulletinMetadata(StrictModel):
     """Метаданные одного выпуска бюллетеня."""
 
     bulletin_id: str = Field(min_length=1)
-    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     schema_version: str = Field(default="1.0", min_length=1)
     package_name: str = Field(default="ai4epi", min_length=1)
     origin_date: str = Field(min_length=1)
@@ -64,9 +64,9 @@ class BulletinMetadata(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def normalize_generated_at_timezone(self) -> "BulletinMetadata":
+    def normalize_generated_at_timezone(self) -> BulletinMetadata:
         if self.generated_at.tzinfo is None:
-            object.__setattr__(self, "generated_at", self.generated_at.replace(tzinfo=timezone.utc))
+            object.__setattr__(self, "generated_at", self.generated_at.replace(tzinfo=UTC))
         return self
 
 
@@ -87,13 +87,13 @@ class BulletinSection(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def populate_plain_text(self) -> "BulletinSection":
+    def populate_plain_text(self) -> BulletinSection:
         if not self.plain_text.strip():
             self.plain_text = flatten_text(self.content)
         return self
 
     @classmethod
-    def from_config(cls, section: SectionConfig, content: Mapping[str, Any]) -> "BulletinSection":
+    def from_config(cls, section: SectionConfig, content: Mapping[str, Any]) -> BulletinSection:
         """Создать объект секции по конфигурации и структурированному payload."""
 
         return cls(
@@ -140,7 +140,7 @@ class Bulletin(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_section_index_consistency(self) -> "Bulletin":
+    def validate_section_index_consistency(self) -> Bulletin:
         section_ids = set(self.sections)
         order_ids = set(self.section_order)
         title_ids = set(self.section_titles)

@@ -25,15 +25,15 @@ import json
 import re
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai4epi.generation.bulletin import Bulletin, flatten_text, load_bulletin
 from ai4epi.core.context import GlobalContext, load_global_context
+from ai4epi.generation.bulletin import Bulletin, flatten_text, load_bulletin
 from ai4epi.generation.narrator import ChatBackend
-
 
 JsonObject = dict[str, Any]
 Severity = Literal["error", "warn", "info"]
@@ -116,7 +116,7 @@ class EvalScore(StrictModel):
     checks_passed: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def validate_passed_not_above_total(self) -> "EvalScore":
+    def validate_passed_not_above_total(self) -> EvalScore:
         if self.checks_passed > self.checks_total and self.checks_total > 0:
             raise ValueError("checks_passed must not exceed checks_total.")
         return self
@@ -229,7 +229,7 @@ class EvalConfig(StrictModel):
         return tuple(normalized)
 
     @model_validator(mode="after")
-    def validate_weights(self) -> "EvalConfig":
+    def validate_weights(self) -> EvalConfig:
         missing = [name for name in self.enabled_evaluators if name not in self.weights]
         if missing:
             raise ValueError(f"weights missing entries for enabled evaluators: {missing!r}.")
@@ -1464,7 +1464,7 @@ class StyleEvaluator(BaseEvaluator):
         )
 
 
-ALL_EVALUATOR_FACTORIES: "OrderedDict[str, type[BaseEvaluator]]" = OrderedDict(
+ALL_EVALUATOR_FACTORIES: OrderedDict[str, type[BaseEvaluator]] = OrderedDict(
     [
         ("numeric", NumericEvaluator),
         ("factual", FactualEvaluator),
@@ -1488,7 +1488,7 @@ def evaluate_bulletin(
     eval_config = config or EvalConfig()
     ctx_dict = _context_dict(ctx)
     bulletin_dict = _bulletin_dict(bulletin)
-    scores: "OrderedDict[str, EvalScore]" = OrderedDict()
+    scores: OrderedDict[str, EvalScore] = OrderedDict()
     all_issues: list[JsonObject] = []
 
     for name in eval_config.enabled_evaluators:
@@ -2182,12 +2182,12 @@ def _shap_inventory(ctx: Mapping[str, Any]) -> list[JsonObject]:
 
 __all__ = [
     "ALL_EVALUATOR_FACTORIES",
-    "BaseEvaluator",
-    "CanonicalClaim",
-    "ClaimVerdict",
     "DEFAULT_ENABLED_EVALUATORS",
     "DEFAULT_EVAL_WEIGHTS",
     "DEFAULT_JUDGE_TEMPERATURE",
+    "BaseEvaluator",
+    "CanonicalClaim",
+    "ClaimVerdict",
     "EvalConfig",
     "EvalReport",
     "EvalScore",

@@ -27,15 +27,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai4epi.core.io import TableWriteOptions, write_table
 from ai4epi.analysis.preprocessing import (
     FeatureEngineeringConfig,
     HoldoutSplitConfig,
@@ -45,6 +45,7 @@ from ai4epi.analysis.preprocessing import (
     make_time_holdout_split,
     supervised_to_feature_list_frame,
 )
+from ai4epi.core.io import TableWriteOptions, write_table
 
 try:  # pragma: no cover - отсутствие sklearn проверяется интеграционным окружением.
     from sklearn.ensemble import HistGradientBoostingRegressor
@@ -152,7 +153,7 @@ class HistGradientBoostingQuantileConfig(StrictModel):
         }
 
 
-def legacy_point_config() -> "HistGradientBoostingPointConfig":
+def legacy_point_config() -> HistGradientBoostingPointConfig:
     """Исходные параметры point-модели из notebook (learning_rate 0.001, 8000 итераций)."""
 
     return HistGradientBoostingPointConfig(learning_rate=0.001, max_iter=8000)
@@ -212,7 +213,7 @@ class ForecastingConfig(StrictModel):
         return lower, upper
 
     @model_validator(mode="after")
-    def validate_point_loss_with_transform(self) -> "ForecastingConfig":
+    def validate_point_loss_with_transform(self) -> ForecastingConfig:
         # Poisson loss в sklearn требует неотрицательную целевую переменную.
         # log1p-преобразование сохраняет неотрицательность при исходном y >= 0.
         if self.point_model.loss == "poisson" and self.target_transform not in {"none", "log1p"}:
@@ -1515,7 +1516,7 @@ def build_model_registry(
     interval_design: dict[str, Any]
     if interval_method == "quantile":
         q_models = quantile_models or {}
-        quantile_keys = sorted(float(q) for q in q_models.keys())
+        quantile_keys = sorted(float(q) for q in q_models)
         if len(quantile_keys) < 2:
             raise ForecastingError("quantile_models должен содержать минимум два квантиля.")
         for q in quantile_keys:
@@ -1684,42 +1685,42 @@ def _require_sklearn() -> None:
 
 
 __all__ = [
-    "TargetTransformName",
-    "ForecastModelFamily",
-    "IntervalMethod",
-    "ForecastingError",
-    "ForecastingConfigError",
-    "ModelTrainingError",
+    "ConformalCalibrationSplit",
     "ForecastArtifactError",
+    "ForecastMetrics",
+    "ForecastModelFamily",
+    "ForecastOutputConfig",
+    "ForecastRunResult",
+    "ForecastTables",
+    "ForecastingConfig",
+    "ForecastingConfigError",
+    "ForecastingError",
     "HistGradientBoostingPointConfig",
     "HistGradientBoostingQuantileConfig",
-    "ForecastingConfig",
-    "ForecastOutputConfig",
-    "ForecastMetrics",
-    "ForecastTables",
-    "ForecastRunResult",
-    "ConformalCalibrationSplit",
+    "IntervalMethod",
+    "ModelTrainingError",
     "TargetTransform",
-    "get_target_transform",
+    "TargetTransformName",
+    "build_conformal_radii_table",
+    "build_forecast_next_table",
+    "build_forecast_tables",
+    "build_history_plus_forecast_table",
+    "build_interval_metrics_table",
+    "build_metrics_summary_table",
+    "build_model_registry",
+    "build_test_predictions_table",
+    "compute_conformal_radii",
+    "conformal_radius_from_abs_errors",
+    "evaluate_intervals",
+    "evaluate_multistep",
     "fit_models_hist_gbdt",
     "fit_models_hist_gbdt_quantiles",
-    "evaluate_multistep",
-    "evaluate_intervals",
-    "conformal_radius_from_abs_errors",
-    "compute_conformal_radii",
+    "get_target_transform",
+    "infer_future_dates",
     "make_conformal_calibration_split",
     "predict_matrix",
     "run_forecast",
     "run_forecast_from_frame",
-    "build_forecast_tables",
-    "build_metrics_summary_table",
-    "build_conformal_radii_table",
-    "build_interval_metrics_table",
-    "build_test_predictions_table",
-    "build_forecast_next_table",
-    "build_history_plus_forecast_table",
-    "infer_future_dates",
     "save_forecast_artifacts",
-    "build_model_registry",
 ]
 

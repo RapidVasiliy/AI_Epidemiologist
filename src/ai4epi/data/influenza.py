@@ -13,12 +13,13 @@
 
 from __future__ import annotations
 
+import importlib
+import re
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-import importlib
 from pathlib import Path
-import re
-from typing import Any, Callable, Mapping, Sequence, TextIO, cast
+from typing import Any, TextIO, cast
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -38,7 +39,7 @@ def _text_stream(text: str) -> TextIO:
     """
 
     stdlib_io = importlib.import_module("io")
-    string_io_factory = cast(Callable[[str], TextIO], getattr(stdlib_io, "StringIO"))
+    string_io_factory = cast(Callable[[str], TextIO], stdlib_io.StringIO)
     return string_io_factory(text)
 
 try:  # requests нужен только для сетевого источника.
@@ -239,7 +240,7 @@ class InfluenzaFetchRequest(BaseModel):
         return normalize_city_slug(value)
 
     @model_validator(mode="after")
-    def _valid_interval(self) -> "InfluenzaFetchRequest":
+    def _valid_interval(self) -> InfluenzaFetchRequest:
         start = iso_week_start_date(self.begin_year, self.begin_week)
         end = iso_week_start_date(self.end_year, self.end_week)
         if end < start:
@@ -723,10 +724,10 @@ def load_influenza_from_model_complex_object(
 
     request = InfluenzaFetchRequest(
         city=city_info.slug,
-        begin_year=int(begin_year if begin_year is not None else getattr(obj, "begin_year")),
-        begin_week=int(begin_week if begin_week is not None else getattr(obj, "begin_week")),
-        end_year=int(end_year if end_year is not None else getattr(obj, "end_year")),
-        end_week=int(end_week if end_week is not None else getattr(obj, "end_week")),
+        begin_year=int(begin_year if begin_year is not None else obj.begin_year),
+        begin_week=int(begin_week if begin_week is not None else obj.begin_week),
+        end_year=int(end_year if end_year is not None else obj.end_year),
+        end_week=int(end_week if end_week is not None else obj.end_week),
     )
     weekly = weekly_incidence_from_cases(cases)
     return InfluenzaFrameBundle(
@@ -772,7 +773,7 @@ def save_weekly_incidence_csv(
         city=info,
         start_date=frame["datetime"].iloc[0].date(),
         end_date=frame["datetime"].iloc[-1].date(),
-        row_count=int(len(frame)),
+        row_count=len(frame),
     )
 
 
@@ -819,31 +820,31 @@ __all__ = [
     "DEFAULT_INFLUENZA_DB_AUTH_TOKEN",
     "INFLUENZA_CASES_SCHEMA",
     "INFLUENZA_WEEKLY_SCHEMA",
-    "InfluenzaDataSourceError",
-    "CityResolutionError",
     "CityInfo",
+    "CityResolutionError",
+    "InfluenzaDataSourceError",
+    "InfluenzaDbClient",
     "InfluenzaDbConfig",
     "InfluenzaFetchRequest",
     "InfluenzaFrameBundle",
     "InfluenzaWeeklyOutput",
-    "InfluenzaDbClient",
     "ModelComplexInfluenzaDataLike",
-    "safe_city_slug",
-    "normalize_city_slug",
-    "resolve_city",
-    "list_supported_cities",
-    "iso_week_start_date",
-    "normalize_end_date",
-    "fetch_request_until_date",
     "build_influenza_db_url",
-    "fetch_influenza_csv_text",
-    "parse_influenza_api_csv",
-    "normalize_influenza_api_frame",
-    "weekly_incidence_from_cases",
-    "load_influenza_weekly_from_api",
-    "load_influenza_from_model_complex_object",
     "default_weekly_output_path",
-    "save_weekly_incidence_csv",
+    "fetch_influenza_csv_text",
+    "fetch_request_until_date",
+    "iso_week_start_date",
+    "list_supported_cities",
+    "load_influenza_from_model_complex_object",
+    "load_influenza_weekly_from_api",
+    "normalize_city_slug",
+    "normalize_end_date",
+    "normalize_influenza_api_frame",
+    "parse_influenza_api_csv",
+    "resolve_city",
+    "safe_city_slug",
     "save_influenza_bundle",
+    "save_weekly_incidence_csv",
+    "weekly_incidence_from_cases",
 ]
 

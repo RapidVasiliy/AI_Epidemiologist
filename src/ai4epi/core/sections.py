@@ -16,14 +16,14 @@ context_mapping. Если нужные данные уже находятся в
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai4epi.core.context import ContextPathError, GlobalContext
-
 
 ContextPath = str | Sequence[str | int]
 JsonObject = dict[str, Any]
@@ -214,7 +214,7 @@ class SectionRegistry(StrictModel):
     sections: list[SectionConfig]
 
     @model_validator(mode="after")
-    def validate_unique_sections(self) -> "SectionRegistry":
+    def validate_unique_sections(self) -> SectionRegistry:
         ids = [section.section_id for section in self.sections]
         duplicated_ids = sorted({section_id for section_id in ids if ids.count(section_id) > 1})
         if duplicated_ids:
@@ -246,7 +246,7 @@ class SectionRegistry(StrictModel):
                 return section
         raise SectionRegistryError(f"Unknown section_id: {section_id!r}.")
 
-    def register(self, section: SectionConfig, *, replace: bool = False) -> "SectionRegistry":
+    def register(self, section: SectionConfig, *, replace: bool = False) -> SectionRegistry:
         """
         Вернуть новый реестр с добавленной секцией.
 
@@ -515,6 +515,7 @@ MECHANISTIC_WAVE_PROMPT = (
     "Если задано reproduction_number, укажи текущее значение R_t по модели (reproduction_number.current, "
     "с диапазоном current_q05–current_q95, если они заданы) и что R_t < 1 означает спад по модели; "
     "называй его оценкой модели, а не измеренной величиной. "
+    "Диапазоны модели Барояна–Рвачёва (br_low–br_high) описывай так, как сказано в band_note. "
     "АБЗАЦ 2 (comparison_text): сопоставь направление прогнозов двух моделей на горизонте четырёх недель "
     "(comparison_with_ml.br_direction и ml_direction). Если agreement_code='agree', напиши, что прогнозы "
     "согласуются: количественный прогноз на ближайшие недели даёт модель машинного обучения, а фазу и "
@@ -668,6 +669,7 @@ def default_section_configs() -> list[SectionConfig]:
                 "diagnostics": "mechanistic_wave.diagnostics",
                 "reproduction_number": "mechanistic_wave.reproduction_number",
                 "band_type": "mechanistic_wave.band_type",
+                "band_note": "mechanistic_wave.band_note",
                 "allowed_claims": "mechanistic_wave.allowed_claims",
                 "forbidden_claims": "mechanistic_wave.forbidden_claims",
                 "semantic": "mechanistic_wave.semantic",
@@ -799,13 +801,13 @@ def save_section_registry(registry: SectionRegistry, path: str | Path, *, indent
 __all__ = [
     "AGE_GROUP_SEASON_OVERVIEW_PROMPT",
     "CURRENT_SITUATION_PROMPT",
-    "ContextPath",
     "EPIDEMIC_WAVE_COMPARISON_PROMPT",
     "FORECAST_RISKS_PROMPT",
-    "JsonObject",
     "MODEL_DESCRIPTION_PROMPT",
     "MODEL_QUALITY_PROMPT",
     "SHAP_INTERPRETATION_PROMPT",
+    "ContextPath",
+    "JsonObject",
     "SectionConfig",
     "SectionConfigError",
     "SectionRegistry",

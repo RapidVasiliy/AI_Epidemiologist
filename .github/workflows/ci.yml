@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"   # полный набор, включая медленные тесты, раз в неделю
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Установка зависимостей по uv.lock
+        run: uv sync --frozen --extra dev --extra mechanistic --extra research
+      - name: Ruff
+        run: uv run --frozen ruff check .
+      - name: Быстрые тесты
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: uv run --frozen pytest -m "not slow" -p no:cacheprovider
+      - name: Полный набор тестов
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: uv run --frozen pytest -p no:cacheprovider

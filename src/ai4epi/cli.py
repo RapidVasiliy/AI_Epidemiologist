@@ -23,8 +23,9 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 try:  # Пакетный импорт.
     from ai4epi.analysis.analysis_pipeline import (
@@ -34,17 +35,17 @@ try:  # Пакетный импорт.
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
     from ai4epi.core.config import (
         default_config,
         load_ai4epi_config,
         run_pipeline_from_config,
         save_ai4epi_config,
     )
-    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, save_eval_report
+    from ai4epi.core.io import TableReadOptions, read_table
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza
     from ai4epi.generation.narrator import make_chat_backend
-    from ai4epi.core.io import TableReadOptions, read_table, write_json
-    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file
-    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file
     from ai4epi.orchestration.workflow import (
         FullWorkflowOutputConfig,
         FullWorkflowSettings,
@@ -52,9 +53,9 @@ try:  # Пакетный импорт.
         run_full_workflow_from_sources,
         run_full_workflow_from_tables,
     )
-    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
-    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
-    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza
+    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file
+    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file
+    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, save_eval_report
 except ImportError:  # pragma: no cover - поддержка запуска из плоского исследовательского каталога.
     from ai4epi.analysis.analysis_pipeline import (  # type: ignore[no-redef]
         AnalysisOutputConfig,
@@ -63,18 +64,17 @@ except ImportError:  # pragma: no cover - поддержка запуска из
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig  # type: ignore[no-redef]
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig  # type: ignore[no-redef]
     from ai4epi.core.config import (  # type: ignore[no-redef]
         default_config,
         load_ai4epi_config,
         run_pipeline_from_config,
         save_ai4epi_config,
     )
-    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, \
-        save_eval_report  # type: ignore[no-redef]
-    from ai4epi.core.io import TableReadOptions, read_table, write_json  # type: ignore[no-redef]
+    from ai4epi.core.io import TableReadOptions, read_table  # type: ignore[no-redef]
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza  # type: ignore[no-redef]
     from ai4epi.generation.narrator import make_chat_backend  # type: ignore[no-redef]
-    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file  # type: ignore[no-redef]
-    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file  # type: ignore[no-redef]
     from ai4epi.orchestration.workflow import (  # type: ignore[no-redef]
         FullWorkflowOutputConfig,
         FullWorkflowSettings,
@@ -82,9 +82,14 @@ except ImportError:  # pragma: no cover - поддержка запуска из
         run_full_workflow_from_sources,
         run_full_workflow_from_tables,
     )
-    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig  # type: ignore[no-redef]
-    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig  # type: ignore[no-redef]
-    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza  # type: ignore[no-redef]
+    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file  # type: ignore[no-redef]
+    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file  # type: ignore[no-redef]
+    from ai4epi.quality.evaluation import (
+        EvalConfig,
+        evaluate_bulletin_from_files,
+        print_eval_report,
+        save_eval_report,  # type: ignore[no-redef]
+    )
 
 
 JsonObject = dict[str, Any]
@@ -139,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_all_command(subparsers)
     _add_run_all_local_command(subparsers)
     _add_backtest_local_command(subparsers)
+    _add_br_conformal_fit_command(subparsers)
     _add_generate_bulletin_command(subparsers)
     _add_evaluate_bulletin_command(subparsers)
     _add_render_command(subparsers)
@@ -336,6 +342,53 @@ def _add_run_all_local_command(subparsers: argparse._SubParsersAction[argparse.A
     _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_all_local)
 
+
+
+def _add_br_conformal_fit_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "br-conformal-fit",
+        help="Таблица конформной полосы модели БР по predictions.csv бэктестов (backtest-local).",
+    )
+    parser.add_argument("predictions", nargs="+", type=Path, help="Файлы predictions.csv или каталоги бэктестов.")
+    parser.add_argument("--output", default=None, type=Path, help="JSON-таблица. По умолчанию: data/calibration/br_conformal.json.")
+    parser.add_argument("--level", type=float, default=0.9, help="Номинальное покрытие. По умолчанию: %(default)s.")
+    parser.add_argument("--min-points", type=int, default=15, help="Минимум точек на горизонт в группе фаз.")
+    parser.add_argument("--evaluate", action="store_true", help="Дополнительно: покрытие при исключении каждого бэктеста.")
+    parser.set_defaults(handler=_cmd_br_conformal_fit)
+
+
+def _cmd_br_conformal_fit(args: argparse.Namespace) -> int:
+    import pandas
+
+    from ai4epi.analysis.br_conformal import DEFAULT_BR_CONFORMAL_PATH, evaluate_leave_one_out, fit_br_conformal
+
+    frames = []
+    for path in args.predictions:
+        file = path / "predictions.csv" if path.is_dir() else path
+        frame = pandas.read_csv(file)
+        frame["source"] = str(file)
+        frames.append(frame)
+    predictions = pandas.concat(frames, ignore_index=True)
+    table = fit_br_conformal(
+        predictions, level=args.level, min_points=args.min_points, sources=[str(p) for p in args.predictions]
+    )
+    report: dict[str, Any] = {"table": table}
+    if args.evaluate and len(frames) > 1:
+        loo = evaluate_leave_one_out(predictions, group_col="source", level=args.level, min_points=args.min_points)
+        report["leave_one_out"] = {
+            "coverage": round(float(loo["inside"].mean()), 3),
+            "mean_width": round(float(loo["width"].mean()), 3),
+            "coverage_by_source": {k: round(float(v), 3) for k, v in loo.groupby("source")["inside"].mean().items()},
+            "coverage_by_phase": {k: round(float(v), 3) for k, v in loo.groupby("phase")["inside"].mean().items()},
+            "coverage_by_horizon": {int(k): round(float(v), 3) for k, v in loo.groupby("horizon")["inside"].mean().items()},
+        }
+        table["leave_one_out"] = report["leave_one_out"]
+    output = args.output or DEFAULT_BR_CONFORMAL_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    report["output"] = str(output)
+    _print_json(report)
+    return EXIT_OK
 
 
 def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import pandas as pd
 from pandas.api.types import (
@@ -25,7 +26,6 @@ from pandas.api.types import (
     is_string_dtype,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 JsonObject = dict[str, Any]
 JsonArray = list[Any]
@@ -104,7 +104,7 @@ class TableSchema(StrictModel):
     column_types: dict[str, ColumnType] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_schema_self_consistency(self) -> "TableSchema":
+    def validate_schema_self_consistency(self) -> TableSchema:
         duplicates = _duplicates([*self.required_columns, *self.optional_columns])
         if duplicates:
             raise ValueError(f"Columns cannot be both required/optional more than once: {duplicates!r}.")
@@ -180,7 +180,7 @@ class ArtifactRecord(StrictModel):
     status: ManifestStatus = "planned"
     size_bytes: int | None = Field(default=None, ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: JsonObject = Field(default_factory=dict)
 
     @classmethod
@@ -192,7 +192,7 @@ class ArtifactRecord(StrictModel):
         kind: str,
         status: ManifestStatus | None = None,
         metadata: Mapping[str, Any] | None = None,
-    ) -> "ArtifactRecord":
+    ) -> ArtifactRecord:
         """Создать запись манифеста по фактическому состоянию файла."""
 
         file_path = Path(path)
@@ -212,7 +212,7 @@ class ArtifactManifest(StrictModel):
     """Манифест файловых артефактов одного запуска."""
 
     run_id: str = Field(min_length=1)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     records: list[ArtifactRecord] = Field(default_factory=list)
     metadata: JsonObject = Field(default_factory=dict)
 
