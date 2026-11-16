@@ -133,8 +133,8 @@ class MechanisticWaveConfig(StrictModel):
     seir_infectious_mean: float = Field(default=2.0, gt=0.0)
     seir_latent_shape: int = Field(default=1, ge=1)
     seir_infectious_shape: int = Field(default=1, ge=1)
-    nuts_tune: int = Field(default=1000, ge=0)
-    nuts_draws: int = Field(default=500, ge=10)
+    nuts_tune: int = Field(default=500, ge=0)
+    nuts_draws: int = Field(default=300, ge=10)
     season_start_week: int = Field(default=35, ge=1, le=53)
     calibration_start: Literal["wave_onset", "season_start"] = "wave_onset"
     onset_lead_weeks: int = Field(default=2, ge=0, le=12)
