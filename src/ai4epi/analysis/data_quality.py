@@ -27,6 +27,8 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from ai4epi.analysis.baselines import BASELINE_LABELS_RU, BASELINE_NAMES, statistical_baselines
+
 JsonObject = dict[str, Any]
 ReliabilityCode = Literal["ok", "reduced", "low"]
 
@@ -40,6 +42,10 @@ REASON_LABELS_RU: dict[str, str] = {
     "not_better_than_persistence": "на проверочном периоде модель не точнее наивного прогноза «как на текущей неделе»",
     "weak_skill_vs_persistence": "выигрыш модели относительно наивного прогноза меньше 10 % по MAE",
     "not_better_than_climatology": "на проверочном периоде модель не точнее среднего многолетнего значения для той же недели",
+    "not_better_than_statistical": (
+        "на проверочном периоде модель не точнее простой статистической модели временного ряда "
+        "(ARIMA с гармониками годового цикла или экспоненциального сглаживания)"
+    ),
     "recent_pcr_imputed_high": "в последних неделях велика доля недель без данных ПЦР (значения восстановлены интерполяцией)",
     "recent_pcr_imputed": "в последних неделях есть недели без данных ПЦР (значения восстановлены интерполяцией)",
     "test_pcr_imputed_high": "в проверочном периоде велика доля недель без данных ПЦР",
@@ -60,6 +66,9 @@ class DataQualityConfig(StrictModel):
     imputed_share_critical: float = Field(default=0.4, ge=0.0, le=1.0)
     weak_skill_threshold: float = Field(default=0.1)
     min_climatology_seasons: int = Field(default=3, ge=1)
+    # ARIMA с гармониками и ETS (ai4epi.analysis.baselines) переобучаются на каждой дате проверочного
+    # периода (~0.2 с на дату); False — только наивный и климатический прогнозы
+    statistical_baselines: bool = True
     holiday_iso_weeks: tuple[int, ...] = HOLIDAY_ISO_WEEKS
     round_digits: int = Field(default=3, ge=0, le=8)
 
@@ -121,6 +130,11 @@ def build_data_quality_block(
     if clim is not None and clim <= 0:
         reasons.append("not_better_than_climatology")
         severity = max(severity, 1)
+    stat_skills = [baselines[n]["mae_skill"] for n in BASELINE_NAMES if n in baselines]
+    stat_skill = min((v for v in stat_skills if v is not None), default=None)
+    if stat_skill is not None and stat_skill <= 0:
+        reasons.append("not_better_than_statistical")
+        severity = max(severity, 1)
     if imputation["recent_share"] is not None and imputation["recent_share"] >= cfg.imputed_share_critical:
         reasons.append("recent_pcr_imputed_high")
         severity = max(severity, 2)
@@ -147,6 +161,8 @@ def build_data_quality_block(
             "reason_codes": reasons,
             "skill_vs_persistence": pers,
             "skill_vs_climatology": clim,
+            "skill_vs_harmonic_arima": baselines.get("harmonic_arima", {}).get("mae_skill"),
+            "skill_vs_ets": baselines.get("ets", {}).get("mae_skill"),
         },
         "round_digits": rd,
     }
@@ -203,9 +219,20 @@ def compare_with_baselines(
             "persistence": "наивный прогноз: значение текущей недели на все горизонты",
             "climatology": "среднее значение той же ISO-недели в предыдущих сезонах",
             "mae_skill": "1 − MAE модели / MAE базового прогноза; ≤ 0 — модель не лучше базового прогноза",
+            **BASELINE_LABELS_RU,
         },
     }
-    for name, pred in (("persistence", persistence), ("climatology", climatology)):
+    candidates = [("persistence", persistence), ("climatology", climatology)]
+    if cfg.statistical_baselines and horizons:
+        stat = {name: np.full((len(origins), horizons), np.nan) for name in BASELINE_NAMES}
+        for i, origin in enumerate(origins):
+            history = series[series.index <= origin].dropna()
+            if len(history) < 104:
+                continue
+            for name, values in statistical_baselines(history, horizons).items():
+                stat[name][i] = values
+        candidates += list(stat.items())
+    for name, pred in candidates:
         mask = np.isfinite(pred)
         base_mae = _mae(y_true, pred, mask)
         model_mae_masked = _mae(y_true, y_pred, mask)

@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field
 
+from ai4epi.analysis.baselines import BASELINE_NAMES, statistical_baselines
 from ai4epi.analysis.forecasting import (
     HistGradientBoostingPointConfig,
     conformal_radius_from_abs_errors,
@@ -69,6 +70,8 @@ class BacktestConfig(StrictModel):
     # (y_t + c), где y_t — значение недели прогноза. Сравниваются с абсолютными.
     interval_level_offset: float = Field(default=1.0, gt=0.0)
     run_mechanistic: bool = True
+    # ARIMA с гармониками и ETS (ai4epi.analysis.baselines) на каждой дате прогноза
+    statistical_baselines: bool = True
     mechanistic: MechanisticWaveConfig = Field(default_factory=lambda: MechanisticWaveConfig(cores=1))
     random_state: int = 42
     n_jobs: int = Field(default_factory=lambda: max(1, (os.cpu_count() or 1)))
@@ -229,6 +232,9 @@ def _origin_task_impl(
             br["br_status"] = f"error: {exc}"
 
     iso_weeks = pd.Series(series.index.isocalendar().week.to_numpy(int), index=series.index)
+    stat: dict[str, np.ndarray] = {}
+    if cfg.statistical_baselines and base["status"] == "ok" and len(series.dropna()) >= 104:
+        stat = statistical_baselines(series.dropna(), cfg.horizons)
     rows = []
     for h in range(1, cfg.horizons + 1):
         target = origin + pd.Timedelta(weeks=h)
@@ -253,6 +259,8 @@ def _origin_task_impl(
         }
         for name, values in preds.items():
             row[f"ml_{name}"] = float(values[h - 1])
+        for name in BASELINE_NAMES:
+            row[name] = float(stat[name][h - 1]) if name in stat else np.nan
         rows.append(row)
     return rows
 
@@ -320,7 +328,7 @@ def _num(value: Any) -> float:
 def evaluate_backtest(pred: pd.DataFrame, cfg: BacktestConfig, *, label: str = "") -> JsonObject:
     model_cols = [c for c in pred.columns if c.startswith("ml_") and not c.startswith(("ml_lo", "ml_hi"))]
     primary = f"ml_{cfg.primary_variant}"
-    compare_cols = [*model_cols, "persistence", "climatology"]
+    compare_cols = [*model_cols, "persistence", "climatology", *[c for c in BASELINE_NAMES if c in pred and pred[c].notna().any()]]
     scored = pred[pred[primary].notna() & pred["y_true"].notna()] if primary in pred else pred.iloc[0:0]
     y = scored["y_true"].to_numpy(float)
 
@@ -372,7 +380,8 @@ def evaluate_backtest(pred: pd.DataFrame, cfg: BacktestConfig, *, label: str = "
     by_phase: JsonObject = {}
     for phase, part in scored.groupby(scored["phase"].fillna("not_run")):
         by_phase[str(phase)] = {
-            c: _metrics(part["y_true"].to_numpy(float), part[c].to_numpy(float)) for c in [primary, "persistence", "br"]
+            c: _metrics(part["y_true"].to_numpy(float), part[c].to_numpy(float))
+            for c in [primary, "persistence", "br", *[b for b in BASELINE_NAMES if b in compare_cols]]
         }
         by_phase[str(phase)]["n_origins"] = int(part["origin"].nunique())
 
