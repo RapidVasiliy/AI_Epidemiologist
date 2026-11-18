@@ -52,3 +52,33 @@ def test_pcr_gaps_interpolated_and_flagged(data_dir):
 def test_unknown_city(data_dir):
     with pytest.raises(LocalDataError, match="Доступные города"):
         load_local_influenza("atlantis", data_dir=data_dir)
+
+
+def test_unsubtyped_a_check():
+    import warnings
+
+    from ai4epi.data.influenza import StrainDoubleCountWarning, check_unsubtyped_a
+
+    weeks = 20
+    ok = pd.DataFrame({"tested_total": [100] * weeks, "tested_strain_0": [0, 1] * 10,
+                       "tested_strain_1": [5] * weeks, "tested_strain_2": [3] * weeks, "tested_strain_3": [2] * weeks})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        res = check_unsubtyped_a(ok)
+    assert res["suspected_double_count"] is False and res["share_a_not_less_than_subtypes"] == 0.0
+    # A = все положительные на A (субтипы — подмножество): A ≥ H1 + H3 почти всегда
+    total_a = ok.assign(tested_strain_0=ok["tested_strain_1"] + ok["tested_strain_2"] + 1)
+    with pytest.warns(StrainDoubleCountWarning, match="двойной счёт"):
+        res = check_unsubtyped_a(total_a)
+    assert res["suspected_double_count"] is True
+
+
+def test_real_spb_pcr_has_unsubtyped_a(data_dir):
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # на реальных данных проверка не должна срабатывать
+        from ai4epi.data.local_excel import load_local_cases
+
+        for city in ("spb", "samara", "chelyabinsk"):
+            load_local_cases(city, data_dir=data_dir, age_pcr_path=None)

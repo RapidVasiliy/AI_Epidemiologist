@@ -119,6 +119,9 @@ class FeatureEngineeringConfig(StrictModel):
     # holiday_ahead_pos; при min_samples_leaf порядка 100 и ~1 праздничной неделе в год
     # деревья их не используют, поэтому по умолчанию выключены.
     holiday_adjust: bool = True
+    # Прогнозы ARIMA с гармониками годового цикла на 1..H недель как признаки arima_h1..arima_hH
+    # (ai4epi.analysis.baselines.harmonic_arima_feature_matrix)
+    arima_features: bool = False
     holiday_features: bool = False
     holiday_iso_weeks: tuple[int, ...] = (1,)
     epidemic_dynamics_eps: float = Field(default=1e-6, gt=0)
@@ -734,6 +737,13 @@ def build_supervised(
         growth_lags=cfg.growth_lags,
         eps=cfg.epidemic_dynamics_eps,
     )
+
+    if cfg.arima_features:
+        from ai4epi.analysis.baselines import harmonic_arima_feature_matrix
+
+        arima = harmonic_arima_feature_matrix(data[cfg.datetime_col], data[cfg.target_col].to_numpy(float), cfg.horizons)
+        for h in range(cfg.horizons):
+            data[f"arima_h{h + 1}"] = arima[:, h]
 
     if cfg.holiday_features:
         data = add_holiday_features(

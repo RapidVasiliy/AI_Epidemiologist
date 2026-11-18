@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import re
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -528,6 +529,63 @@ def parse_influenza_api_csv(
     return normalize_influenza_api_frame(raw)
 
 
+class StrainDoubleCountWarning(UserWarning):
+    """Колонка «A» похожа на все положительные на A, а не на A без субтипа (возможен двойной счёт)."""
+
+
+def check_unsubtyped_a(
+    frame: pd.DataFrame,
+    *,
+    a_col: str = "tested_strain_0",
+    subtype_cols: Sequence[str] = ("tested_strain_1", "tested_strain_2"),
+    other_cols: Sequence[str] = ("tested_strain_3",),
+    tested_col: str = "tested_total",
+    min_weeks: int = 10,
+    share_threshold: float = 0.8,
+    source: str = "",
+) -> dict[str, Any]:
+    """Проверить, что колонка A — грипп A *без* субтипа, а не все положительные на A.
+
+    Оценка гриппа суммирует A + A(H1N1)pdm09 + A(H3N2) + B: это верно, только если категории не
+    пересекаются. Если A — все положительные на A (субтипы — его подмножество), субтипированные случаи
+    считаются дважды. Признаки двойного счёта: на неделях с субтипами A почти всегда не меньше их суммы;
+    сумма всех категорий больше числа протестированных. В выгрузках db.influenza.spb.ru и общероссийской
+    выгрузке 2017/18 A = 0 на 76–91 % недель с субтипами — это несубтипированный остаток.
+    При подозрении выдаётся ``StrainDoubleCountWarning``; возвращается сводка проверки.
+    """
+
+    a = pd.to_numeric(frame[a_col], errors="coerce").fillna(0)
+    sub = sum(pd.to_numeric(frame[c], errors="coerce").fillna(0) for c in subtype_cols)
+    other = sum(pd.to_numeric(frame[c], errors="coerce").fillna(0) for c in other_cols)
+    tested = pd.to_numeric(frame[tested_col], errors="coerce")
+    active = sub > 0
+    n_active = int(active.sum())
+    share = float((a[active] >= sub[active]).mean()) if n_active else None
+    exceeds = int(((a + sub + other) > tested).fillna(False).sum())
+    # единичные недели, где сумма категорий больше числа проб, — ошибки ввода (Челябинск: 3 из 144);
+    # систематическое превышение — признак пересекающихся категорий
+    exceeds_share = exceeds / n_active if n_active else 0.0
+    suspected = bool(
+        n_active >= min_weeks and ((share is not None and share >= share_threshold) or exceeds_share >= 0.2)
+    )
+    result = {
+        "weeks_with_subtypes": n_active,
+        "share_a_not_less_than_subtypes": None if share is None else round(share, 3),
+        "weeks_sum_exceeds_tested": exceeds,
+        "suspected_double_count": suspected,
+    }
+    if suspected:
+        warnings.warn(
+            f"{source or 'ПЦР'}: колонка «A» похожа на все положительные на грипп A, а не на A без субтипа "
+            f"(A ≥ суммы субтипов на {share if share is not None else float('nan'):.0%} из {n_active} недель с субтипами; "
+            f"недель, где сумма категорий больше числа проб: {exceeds}). Оценка гриппа суммирует A и субтипы — "
+            "возможен двойной счёт. Проверьте описание полей выгрузки.",
+            StrainDoubleCountWarning,
+            stacklevel=2,
+        )
+    return result
+
+
 def normalize_influenza_api_frame(raw: pd.DataFrame) -> pd.DataFrame:
     """Нормализует сырой DataFrame influenza DB к контракту ``cases``."""
 
@@ -556,6 +614,7 @@ def normalize_influenza_api_frame(raw: pd.DataFrame) -> pd.DataFrame:
         df["population_age_group_4"] + df["population_age_group_5"]
     )
 
+    df.attrs["strain_check"] = check_unsubtyped_a(df, source="db.influenza")
     for strain_index in STRAIN_NAMES:
         tested_strain_col = f"tested_strain_{strain_index}"
         rel_col = f"rel_strain_{strain_index}"

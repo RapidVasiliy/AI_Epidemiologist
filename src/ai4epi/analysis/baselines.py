@@ -98,6 +98,66 @@ def forecast_ets(series: pd.Series, horizons: int, config: BaselineConfig | None
         return np.full(horizons, np.nan)
 
 
+def harmonic_arima_feature_matrix(
+    dates: pd.Series | pd.DatetimeIndex,
+    values: np.ndarray,
+    horizons: int,
+    config: BaselineConfig | None = None,
+    *,
+    warmup_weeks: int = 26,
+) -> np.ndarray:
+    """Прогнозы ARIMA с гармониками на 1..horizons недель от каждой недели ряда — признаки ML-модели.
+
+    Параметры модели «регрессия на гармоники + ARMA-ошибки» на log(1 + y) подбираются один раз по
+    последним ``train_years`` годам ряда (данные до даты прогноза), затем для каждой недели t прогноз
+    на t + h считается ARMA-рекурсией по остаткам u_t = z_t − x_t·b и инновациям до t включительно —
+    без данных после t. Возвращается массив (n, horizons) в исходной шкале; первые ``warmup_weeks``
+    строк — NaN. Если модель не сходится — весь массив NaN.
+    """
+
+    from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+    cfg = config or BaselineConfig()
+    p_ord, d_ord, q_ord = cfg.arima_order
+    if d_ord != 0:
+        raise ValueError("Признаки ARIMA поддерживают только d = 0.")
+    idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    y = pd.Series(np.asarray(values, dtype=float), index=idx).interpolate(limit_direction="both").to_numpy()
+    z = np.log1p(np.clip(y, 0, None))
+    t = _week_index(idx)
+    x = np.column_stack([np.ones(len(t)), _fourier(t, cfg.harmonics)])
+    n = len(z)
+    out = np.full((n, horizons), np.nan)
+    fit_from = max(0, n - int(cfg.train_years * 52.18))
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = SARIMAX(z[fit_from:], exog=x[fit_from:], order=cfg.arima_order, trend="n").fit(disp=False, maxiter=200)
+    except Exception:
+        return out
+    params = np.asarray(res.params, dtype=float)
+    k = x.shape[1]
+    b, phi, theta = params[:k], params[k : k + p_ord], params[k + p_ord : k + p_ord + q_ord]
+    u = z - x @ b
+    eps = np.zeros(n)
+    for i in range(n):
+        pred = sum(phi[j] * u[i - 1 - j] for j in range(p_ord) if i - 1 - j >= 0)
+        pred += sum(theta[j] * eps[i - 1 - j] for j in range(q_ord) if i - 1 - j >= 0)
+        eps[i] = u[i] - pred
+    for i in range(n):
+        hist_u = [u[i - j] for j in range(p_ord)]  # u_t, u_{t-1}, ...
+        for h in range(1, horizons + 1):
+            u_hat = sum(phi[j] * hist_u[j] for j in range(p_ord))
+            # инновации известны только до t: вклад MA есть лишь у шагов h ≤ q
+            u_hat += sum(theta[j] * eps[i + h - 1 - j] for j in range(q_ord) if h - 1 - j <= 0 and i + h - 1 - j >= 0)
+            hist_u = [u_hat, *hist_u[:-1]] if p_ord else hist_u
+            tt = t[i] + h
+            xf = np.concatenate([[1.0], _fourier(np.array([tt]), cfg.harmonics)[0]])
+            out[i, h - 1] = np.expm1(xf @ b + u_hat)
+    out[:warmup_weeks] = np.nan
+    return np.clip(out, 0.0, None)
+
+
 def statistical_baselines(
     series: pd.Series,
     horizons: int,
@@ -124,5 +184,6 @@ __all__ = [
     "BaselineConfig",
     "forecast_ets",
     "forecast_harmonic_arima",
+    "harmonic_arima_feature_matrix",
     "statistical_baselines",
 ]

@@ -31,6 +31,7 @@ from ai4epi.data.age_pcr import CITY_TO_DISTRICT, attach_age_pcr, load_age_pcr
 from ai4epi.data.influenza import (
     INFLUENZA_CASES_SCHEMA,
     STRAIN_NAMES,
+    check_unsubtyped_a,
     weekly_incidence_from_cases,
 )
 
@@ -189,6 +190,7 @@ def load_local_cases(
     pcr["tested_total"] = pd.to_numeric(raw_pcr[PCR_TESTED_COLUMN], errors="coerce")
     for index, strain in STRAIN_NAMES.items():
         pcr[f"tested_strain_{index}"] = pd.to_numeric(raw_pcr[strain], errors="coerce")
+    check_unsubtyped_a(pcr, source=str(pcr_path))
 
     merged = cases.merge(pcr, on="datetime", how="left", validate="one_to_one")
     merged = merged.sort_values("datetime").reset_index(drop=True)
