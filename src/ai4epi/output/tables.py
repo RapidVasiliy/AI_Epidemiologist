@@ -9,10 +9,10 @@ does not alter numerical results, and does not depend on ReportLab.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
-
+from typing import Any
 
 JsonObject = dict[str, Any]
 
@@ -134,10 +134,7 @@ def _iter_asset_paths(raw_assets: Mapping[str, Any] | Sequence[Any] | None) -> l
     paths: list[Path] = []
     for value in values:
         path_value: Any = None
-        if isinstance(value, Mapping):
-            path_value = value.get("path")
-        else:
-            path_value = getattr(value, "path", None)
+        path_value = value.get("path") if isinstance(value, Mapping) else getattr(value, "path", None)
         if path_value:
             paths.append(Path(str(path_value)).expanduser())
     return paths

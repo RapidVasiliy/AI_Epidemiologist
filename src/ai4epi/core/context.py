@@ -10,9 +10,10 @@ sections without changing the core package.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -83,7 +84,7 @@ class ForecastHorizon(ExtensibleModel):
     pi_width: float | None = None
 
     @model_validator(mode="after")
-    def validate_interval_consistency(self) -> "ForecastHorizon":
+    def validate_interval_consistency(self) -> ForecastHorizon:
         if self.q_lo is not None and self.q_hi is not None and self.q_hi < self.q_lo:
             raise ValueError("q_hi must be greater than or equal to q_lo.")
         return self
@@ -262,7 +263,7 @@ class GlobalContext(ExtensibleModel):
     age_group_season: AgeGroupSeasonContext | None = None
 
     @model_validator(mode="after")
-    def validate_temporal_alignment(self) -> "GlobalContext":
+    def validate_temporal_alignment(self) -> GlobalContext:
         if self.origin.iso_year != self.origin.origin_date.isocalendar().year:
             raise ValueError("origin.iso_year does not match origin.origin_date ISO year.")
         if self.origin.iso_week != self.origin.origin_date.isocalendar().week:

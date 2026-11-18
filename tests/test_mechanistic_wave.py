@@ -100,3 +100,97 @@ def test_section_registered_and_optional():
     assert section.required is False and section.activation_path == "mechanistic_wave"
     ids = registry.section_ids()
     assert ids.index("forecast_risks") < ids.index("mechanistic_wave") < ids.index("shap_interpretation")
+
+
+def test_agreement_not_assessed_after_wave(synthetic_weekly):
+    full = synthetic_weekly()
+    cfg = FAST.model_copy(update={"calibration_start_date": full["datetime"].iloc[6].date()})
+    weekly = full.iloc[:27]  # фаза post_wave
+    ml = {"point": [5.0] * 4, "lo": [0.0] * 4, "hi": [10.0] * 4, "dates": []}
+    block = run_mechanistic_wave_analysis(weekly, ml_forecast=ml, config=cfg).context_block
+    assert block["phase_code"] == "post_wave"
+    assert block["comparison_with_ml"]["agreement_code"] is None
+    assert block["comparison_with_ml"]["agreement_note"]
+
+
+def test_small_absolute_gaps_are_not_disagreement():
+    from ai4epi.analysis.mechanistic_wave import compare_with_ml
+
+    dates = pd.Series(pd.date_range("2020-01-06", periods=6, freq="7D"))
+    best = np.array([1.0, 1.0, 1.0, 1.2, 1.4, 1.6])  # БР: рост с 1 до 1.6 на 10 тыс.
+    ml = {"point": [3.0, 3.5, 4.0, 4.5], "lo": [0.0] * 4, "hi": [9.0] * 4, "dates": []}  # ML примерно втрое выше
+    _, cmp_floor, _ = compare_with_ml(1.0, best, None, None, dates, 1, ml, MechanisticWaveConfig())
+    assert cmp_floor["agreement_code"] == "agree"  # разница < 5 на 10 тыс. не считается расхождением
+    strict = MechanisticWaveConfig(agreement_gap_floor_per_10k=0.0)
+    _, cmp_strict, _ = compare_with_ml(1.0, best, None, None, dates, 1, ml, strict)
+    assert "scale" in cmp_strict["disagreement_reasons"]
+
+
+def test_bootstrap_band_and_reproduction_number(synthetic_weekly):
+    weekly = synthetic_weekly()
+    noisy = weekly.copy()
+    rng = np.random.default_rng(0)
+    noisy["total_cases_formula"] = np.maximum(noisy["total_cases_formula"] * rng.normal(1, 0.1, len(noisy)), 0).round()
+    noisy["inc_per_10k"] = noisy["total_cases_formula"] / noisy["total_population"] * 10_000
+    origin = noisy["datetime"].iloc[14]
+    cfg = MechanisticWaveConfig(method="bootstrap", bootstrap_replicates=15, random_seed=0, br_band="model")
+    res = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=cfg)
+    assert res.status == "ok"
+    block = res.context_block
+    assert block["band_type"] == "predictive" and block["n_trajectories"] == 15
+    rt = block["reproduction_number"]
+    assert rt["current"] > 0 and rt["max"] >= rt["current"]
+    assert rt["current_q05"] is not None and rt["current_q05"] <= rt["current_q95"]
+    traj = res.trajectories
+    assert {"r_t", "r_t_q05", "r_t_q95", "q05", "q95"} <= set(traj.columns)
+    assert (traj["q95"] >= traj["q05"]).all()
+    param = run_mechanistic_wave_analysis(
+        noisy, origin_date=origin, config=cfg.model_copy(update={"bootstrap_band": "parameter"})
+    )
+    width = lambda t: float((t["q95"] - t["q05"]).mean())  # noqa: E731
+    assert width(param.trajectories) < width(traj)  # шум наблюдений расширяет полосу
+
+
+def test_seir_kernel_configuration(synthetic_weekly):
+    from ai4epi.mechanistic.models import DEFAULT_INFECTIVITY_PROFILE, mean_generation_time
+
+    cfg = MechanisticWaveConfig(method="annealing", random_seed=0, model_kernel="seir", br_band="model")
+    g = cfg.kernel_profile()
+    # по умолчанию средний интервал между поколениями SEIR близок к БР — различается форма профиля
+    assert mean_generation_time(g) == pytest.approx(mean_generation_time(DEFAULT_INFECTIVITY_PROFILE), abs=0.3)
+    assert cfg.beta_scale() == pytest.approx(np.sum(DEFAULT_INFECTIVITY_PROFILE) / g.sum())
+    weekly = synthetic_weekly()
+    res = run_mechanistic_wave_analysis(weekly, origin_date=weekly["datetime"].iloc[16], config=cfg)
+    assert res.status == "ok"
+    assert res.context_block["model_kernel"] == "seir" and "SEIR" in res.context_block["model_name_ru"]
+    assert res.context_block["fit_r2_in_sample"] > 0.9  # данные порождены моделью БР, SEIR описывает их близко
+    assert MechanisticWaveConfig(method="nuts").resolved_incidence() == "exponential"
+    assert MechanisticWaveConfig().resolved_incidence() == "linear_capped"
+
+
+@pytest.mark.slow
+def test_nuts_calibration_on_synthetic_wave(synthetic_weekly):
+    weekly = synthetic_weekly()
+    cfg = MechanisticWaveConfig(method="nuts", nuts_tune=300, nuts_draws=200, chains=2, cores=1, random_seed=0, br_band="model")
+    res = run_mechanistic_wave_analysis(weekly, origin_date=weekly["datetime"].iloc[16], config=cfg)
+    block = res.context_block
+    assert res.status == "ok" and block["method"] == "nuts"
+    assert block["fit_r2_in_sample"] > 0.95
+    assert block["diagnostics"]["r_hat_max"] < 1.1
+
+
+def test_wave_onset_fallback_on_noisy_series(synthetic_weekly):
+    weekly = synthetic_weekly(lead_weeks=6, wave_weeks=30)
+    noisy = weekly.copy()
+    # нулевые недели посреди подъёма (мало проб ПЦР): «3 недели роста подряд» не набирается
+    rising = noisy.index[(noisy["inc_per_10k"] > 1) & (noisy.index < noisy["inc_per_10k"].idxmax())]
+    zero = rising[::2]
+    noisy.loc[zero, ["total_cases_formula", "inc_per_10k"]] = 0.0
+    origin = noisy["datetime"].iloc[noisy["inc_per_10k"].idxmax() + 2]
+    strict = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=FAST.model_copy(update={"wave_smoothing_fallback_weeks": 0}))
+    assert strict.status == "no_wave"
+    res = run_mechanistic_wave_analysis(noisy, origin_date=origin, config=FAST.model_copy(update={"br_band": "model"}))
+    assert res.status == "ok" and res.context_block["wave_onset_smoothed"] is True
+    assert any("скользящему среднему" in w for w in res.warnings)
+    clean = run_mechanistic_wave_analysis(weekly, origin_date=origin, config=FAST.model_copy(update={"br_band": "model"}))
+    assert clean.context_block["wave_onset_smoothed"] is False

@@ -25,15 +25,15 @@ import json
 import re
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Iterable, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai4epi.generation.bulletin import Bulletin, flatten_text, load_bulletin
 from ai4epi.core.context import GlobalContext, load_global_context
+from ai4epi.generation.bulletin import Bulletin, flatten_text, load_bulletin
 from ai4epi.generation.narrator import ChatBackend
-
 
 JsonObject = dict[str, Any]
 Severity = Literal["error", "warn", "info"]
@@ -116,7 +116,7 @@ class EvalScore(StrictModel):
     checks_passed: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
-    def validate_passed_not_above_total(self) -> "EvalScore":
+    def validate_passed_not_above_total(self) -> EvalScore:
         if self.checks_passed > self.checks_total and self.checks_total > 0:
             raise ValueError("checks_passed must not exceed checks_total.")
         return self
@@ -229,7 +229,7 @@ class EvalConfig(StrictModel):
         return tuple(normalized)
 
     @model_validator(mode="after")
-    def validate_weights(self) -> "EvalConfig":
+    def validate_weights(self) -> EvalConfig:
         missing = [name for name in self.enabled_evaluators if name not in self.weights]
         if missing:
             raise ValueError(f"weights missing entries for enabled evaluators: {missing!r}.")
@@ -465,6 +465,10 @@ class FactualEvaluator(BaseEvaluator):
             "predicates": ["family_code", "strategy_code", "calibration_start_year"],
             "notes": "Нормализуй тип модели, стратегию многошагового прогноза и стартовый год калибровки.",
         },
+        "age_group_forecast": {
+            "predicates": ["highest_current_group"],
+            "notes": "Нормализуй утверждение о том, в какой возрастной группе (age_0_14 или age_15_plus) заболеваемость сейчас выше.",
+        },
         "mechanistic_wave": {
             "predicates": ["phase_code", "agreement_code"],
             "notes": (
@@ -509,6 +513,10 @@ class FactualEvaluator(BaseEvaluator):
             self._add_claim(claims, "forecast_has_intermediate_rise", "forecast_risks", "has_intermediate_rise", True, weight=1.0)
         if forecast_sem.get("has_intermediate_decline"):
             self._add_claim(claims, "forecast_has_intermediate_decline", "forecast_risks", "has_intermediate_decline", True, weight=1.0)
+
+        age_fc_sem = _semantic(ctx, "age_group_forecast")
+        if age_fc_sem:
+            self._add_claim(claims, "age_group_forecast_highest_current_group", "age_group_forecast", "highest_current_group", age_fc_sem.get("highest_current_group"), weight=1.5)
 
         mech_sem = _semantic(ctx, "mechanistic_wave")
         if mech_sem:
@@ -726,6 +734,8 @@ class FactualEvaluator(BaseEvaluator):
             return _semantic(ctx, "age_group_season")
         if section == "mechanistic_wave":
             return _semantic(ctx, "mechanistic_wave")
+        if section == "age_group_forecast":
+            return _semantic(ctx, "age_group_forecast")
         if section == "model_description":
             model_info = _as_mapping(ctx.get("model_info"))
             return {
@@ -1454,7 +1464,7 @@ class StyleEvaluator(BaseEvaluator):
         )
 
 
-ALL_EVALUATOR_FACTORIES: "OrderedDict[str, type[BaseEvaluator]]" = OrderedDict(
+ALL_EVALUATOR_FACTORIES: OrderedDict[str, type[BaseEvaluator]] = OrderedDict(
     [
         ("numeric", NumericEvaluator),
         ("factual", FactualEvaluator),
@@ -1478,7 +1488,7 @@ def evaluate_bulletin(
     eval_config = config or EvalConfig()
     ctx_dict = _context_dict(ctx)
     bulletin_dict = _bulletin_dict(bulletin)
-    scores: "OrderedDict[str, EvalScore]" = OrderedDict()
+    scores: OrderedDict[str, EvalScore] = OrderedDict()
     all_issues: list[JsonObject] = []
 
     for name in eval_config.enabled_evaluators:
@@ -1943,6 +1953,7 @@ def _narrative_section_names(bulletin: Mapping[str, Any]) -> list[str]:
         "age_group_season_overview",
         "forecast_risks",
         "mechanistic_wave",
+        "age_group_forecast",
         "shap_interpretation",
         "model_quality",
         "model_description",
@@ -2171,12 +2182,12 @@ def _shap_inventory(ctx: Mapping[str, Any]) -> list[JsonObject]:
 
 __all__ = [
     "ALL_EVALUATOR_FACTORIES",
-    "BaseEvaluator",
-    "CanonicalClaim",
-    "ClaimVerdict",
     "DEFAULT_ENABLED_EVALUATORS",
     "DEFAULT_EVAL_WEIGHTS",
     "DEFAULT_JUDGE_TEMPERATURE",
+    "BaseEvaluator",
+    "CanonicalClaim",
+    "ClaimVerdict",
     "EvalConfig",
     "EvalReport",
     "EvalScore",

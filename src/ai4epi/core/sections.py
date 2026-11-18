@@ -16,14 +16,14 @@ context_mapping. Если нужные данные уже находятся в
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai4epi.core.context import ContextPathError, GlobalContext
-
 
 ContextPath = str | Sequence[str | int]
 JsonObject = dict[str, Any]
@@ -214,7 +214,7 @@ class SectionRegistry(StrictModel):
     sections: list[SectionConfig]
 
     @model_validator(mode="after")
-    def validate_unique_sections(self) -> "SectionRegistry":
+    def validate_unique_sections(self) -> SectionRegistry:
         ids = [section.section_id for section in self.sections]
         duplicated_ids = sorted({section_id for section_id in ids if ids.count(section_id) > 1})
         if duplicated_ids:
@@ -246,7 +246,7 @@ class SectionRegistry(StrictModel):
                 return section
         raise SectionRegistryError(f"Unknown section_id: {section_id!r}.")
 
-    def register(self, section: SectionConfig, *, replace: bool = False) -> "SectionRegistry":
+    def register(self, section: SectionConfig, *, replace: bool = False) -> SectionRegistry:
         """
         Вернуть новый реестр с добавленной секцией.
 
@@ -438,6 +438,9 @@ FORECAST_RISKS_PROMPT = (
     "принимающего решения. "
     "АБЗАЦ 3 (risk_assessment): дай сдержанную оценку риска для недельного мониторинга "
     "на ближайшие 4 недели. Не выходи за рамки данных и не делай причинных выводов. "
+    "Если forecast_reliability не равно 'обычная', обязательно напиши, что надёжность количественного "
+    "прогноза на этой неделе пониженная или низкая (по значению forecast_reliability), и кратко назови "
+    "причины из reliability_reasons. "
     "ПРАВИЛА: используй только данные из JSON-контекста; не придумывай дополнительные факты; "
     "используй только недельную шкалу времени — не пиши про дни, сутки, вчера, сегодня или месяцы; "
     "стиль официальный и нейтральный."
@@ -474,6 +477,10 @@ MODEL_QUALITY_PROMPT = (
     "bias_description_ru, по месяцам peak_error_months и по статистике ошибок. "
     "Объясни, что это означает для практического использования прогноза. "
     "Не добавляй недоказанные причины ошибок. "
+    "Сравни модель с базовыми прогнозами из baselines: наивным (persistence — значение текущей недели) и "
+    "климатическим (climatology — среднее той же недели в прошлых сезонах) по MAE и mae_skill. Если "
+    "reliability не равно 'обычная', в limitations_text прямо назови надёжность и причины из reliability_reasons; "
+    "если mae_skill относительно наивного прогноза ≤ 0, напиши, что модель не точнее наивного прогноза. "
     "СТИЛЬ: нейтральный, для специалиста. Аббревиатуры MAE, RMSE и R² можно "
     "использовать как общепринятые обозначения."
 )
@@ -505,14 +512,41 @@ MECHANISTIC_WAVE_PROMPT = (
     "волны и её определение (wave_end.definition); иначе напиши, что завершение за пределами горизонта "
     "моделирования. Если early_phase_caution=true, явно укажи, что оценки на ранней фазе роста ориентировочные. "
     "Упомяни R² на калибровочном участке только как характеристику описания наблюдаемой части волны. "
+    "Если задано reproduction_number, укажи текущее значение R_t по модели (reproduction_number.current, "
+    "с диапазоном current_q05–current_q95, если они заданы) и что R_t < 1 означает спад по модели; "
+    "называй его оценкой модели, а не измеренной величиной. "
+    "Диапазоны модели Барояна–Рвачёва (br_low–br_high) описывай так, как сказано в band_note. "
     "АБЗАЦ 2 (comparison_text): сопоставь направление прогнозов двух моделей на горизонте четырёх недель "
     "(comparison_with_ml.br_direction и ml_direction). Если agreement_code='agree', напиши, что прогнозы "
     "согласуются: количественный прогноз на ближайшие недели даёт модель машинного обучения, а фазу и "
     "максимум — механистическая модель. Если agreement_code='disagree', напиши, что прогнозы расходятся "
     "(по направлению и/или масштабу — disagreement_reasons), что это признак повышенной неопределённости и "
     "что прогнозы не усредняются. Если diagnostics.converged=false, добавь, что оценки параметров неустойчивы. "
+    "Если agreement_code равен null и задано agreement_note (волна завершилась), напиши, что сопоставление "
+    "моделей не проводится и вывод опирается на ML-прогноз. "
+    "Если age_groups не null, добавь в phase_text одно-два предложения о фазе и сроке максимума по возрастным "
+    "группам (age_groups.groups[].phase_label, peak) и о том, на сколько недель максимум у детей опережает "
+    "максимум у взрослых (children_peak_lead_weeks); не интерпретируй contact_matrix. "
     "ПРАВИЛА: используй только данные из JSON; соблюдай forbidden_claims; недельная шкала времени; "
     "не называй параметры alpha и beta, если об этом не просят данные; официальный нейтральный стиль, без списков."
+)
+
+AGE_GROUP_FORECAST_PROMPT = (
+    "Ты Narrator — автор раздела 'Прогноз по возрастным группам' в бюллетене по гриппу. "
+    "Верни JSON: {groups_forecast_text, groups_comparison_text}. "
+    "АБЗАЦ 1 (groups_forecast_text): для каждой группы из groups (age_group_label) укажи текущее значение "
+    "current_value и прогноз на 1 и 4 недели (horizons[0] и horizons[3]: point_forecast и прогнозный интервал "
+    "q_lo–q_hi), направление direction; отметь, в какой группе заболеваемость сейчас выше "
+    "(semantic.highest_current_group). Единица — случаи на 10 тыс. населения соответствующей группы; значения "
+    "разных групп относятся к разным знаменателям. "
+    "АБЗАЦ 2 (groups_comparison_text): кратко опиши качество моделей групп на проверочном периоде "
+    "(test_metrics: R², MAE, interval_coverage) и допущение assumption_note; если группа входит в "
+    "semantic.groups_not_better_than_persistence, прямо укажи, что на проверочном периоде прогноз для неё не "
+    "точнее наивного (значение текущей недели), и его следует использовать с осторожностью. Если у группы поле mechanistic "
+    "не null, сопоставь направление ML-прогноза с механистической моделью (mechanistic.comparison_with_ml."
+    "agreement); при расхождении напиши о повышенной неопределённости для этой группы, не усредняя прогнозы. "
+    "ПРАВИЛА: только данные из JSON; недельная шкала времени; без причинных выводов; термин 'прогнозный "
+    "интервал'; официальный нейтральный стиль, без списков."
 )
 
 
@@ -604,6 +638,8 @@ def default_section_configs() -> list[SectionConfig]:
                 "relative_uncertainty_pct": "forecast.relative_uncertainty_pct",
                 "max_interval_width": "forecast.max_interval_width",
                 "semantic": "forecast.semantic",
+                "forecast_reliability": "data_quality.reliability",
+                "reliability_reasons": "data_quality.reasons",
             },
         ),
         SectionConfig(
@@ -631,18 +667,52 @@ def default_section_configs() -> list[SectionConfig]:
                 "horizons": "mechanistic_wave.horizons",
                 "comparison_with_ml": "mechanistic_wave.comparison_with_ml",
                 "diagnostics": "mechanistic_wave.diagnostics",
+                "reproduction_number": "mechanistic_wave.reproduction_number",
+                "band_type": "mechanistic_wave.band_type",
+                "band_note": "mechanistic_wave.band_note",
                 "allowed_claims": "mechanistic_wave.allowed_claims",
                 "forbidden_claims": "mechanistic_wave.forbidden_claims",
                 "semantic": "mechanistic_wave.semantic",
+                "age_groups": "mechanistic_wave.age_groups",
             },
             metadata={
                 "expected_numbers": [
                     {"label": "величина максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.value", "required": True},
                     {"label": "неделя максимума по модели Барояна–Рвачёва", "path": "mechanistic_wave.peak.iso_week", "required": False},
+                    {"label": "эффективное репродуктивное число R_t по модели", "path": "mechanistic_wave.reproduction_number.current", "required": False},
                 ],
                 "editor_field_roles": {
                     "phase_text": "абзац о фазе эпидемической волны, сроке и величине максимума по механистической модели",
                     "comparison_text": "абзац о согласии или расхождении прогнозов механистической модели и модели машинного обучения",
+                },
+            },
+        ),
+        SectionConfig(
+            section_id="age_group_forecast",
+            title="Прогноз по возрастным группам",
+            prompt=AGE_GROUP_FORECAST_PROMPT,
+            output_schema=make_text_object_schema("groups_forecast_text", "groups_comparison_text"),
+            evidence_key="age_group_forecast_context",
+            order=47,
+            max_tokens=900,
+            activation_path="age_group_forecast",
+            required=False,
+            context_mapping={
+                "metric_label_ru": "age_group_forecast.metric_label_ru",
+                "model_name_ru": "age_group_forecast.model_name_ru",
+                "assumption_note": "age_group_forecast.assumption_note",
+                "cross_group_note": "age_group_forecast.cross_group_note",
+                "groups": "age_group_forecast.groups",
+                "semantic": "age_group_forecast.semantic",
+            },
+            metadata={
+                "expected_numbers": [
+                    {"label": "прогноз на 1 неделю, первая возрастная группа", "path": "age_group_forecast.groups.0.horizons.0.point_forecast", "required": True},
+                    {"label": "прогноз на 1 неделю, вторая возрастная группа", "path": "age_group_forecast.groups.1.horizons.0.point_forecast", "required": True},
+                ],
+                "editor_field_roles": {
+                    "groups_forecast_text": "абзац с прогнозом заболеваемости по возрастным группам",
+                    "groups_comparison_text": "абзац о качестве моделей групп и согласии с механистической моделью",
                 },
             },
         ),
@@ -674,6 +744,10 @@ def default_section_configs() -> list[SectionConfig]:
                 "error_stats_h1": "model_quality.error_stats_h1",
                 "bias_description_ru": "model_quality.worst_case_pattern",
                 "semantic": "model_quality.semantic",
+                "baselines": "data_quality.baselines",
+                "reliability": "data_quality.reliability",
+                "reliability_reasons": "data_quality.reasons",
+                "pcr_imputation": "data_quality.pcr_imputation",
             },
         ),
         SectionConfig(
@@ -727,13 +801,13 @@ def save_section_registry(registry: SectionRegistry, path: str | Path, *, indent
 __all__ = [
     "AGE_GROUP_SEASON_OVERVIEW_PROMPT",
     "CURRENT_SITUATION_PROMPT",
-    "ContextPath",
     "EPIDEMIC_WAVE_COMPARISON_PROMPT",
     "FORECAST_RISKS_PROMPT",
-    "JsonObject",
     "MODEL_DESCRIPTION_PROMPT",
     "MODEL_QUALITY_PROMPT",
     "SHAP_INTERPRETATION_PROMPT",
+    "ContextPath",
+    "JsonObject",
     "SectionConfig",
     "SectionConfigError",
     "SectionRegistry",

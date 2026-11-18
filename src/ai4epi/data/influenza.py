@@ -13,12 +13,14 @@
 
 from __future__ import annotations
 
+import importlib
+import re
+import warnings
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-import importlib
 from pathlib import Path
-import re
-from typing import Any, Callable, Mapping, Sequence, TextIO, cast
+from typing import Any, TextIO, cast
 from urllib.parse import urlencode
 
 import pandas as pd
@@ -38,7 +40,7 @@ def _text_stream(text: str) -> TextIO:
     """
 
     stdlib_io = importlib.import_module("io")
-    string_io_factory = cast(Callable[[str], TextIO], getattr(stdlib_io, "StringIO"))
+    string_io_factory = cast(Callable[[str], TextIO], stdlib_io.StringIO)
     return string_io_factory(text)
 
 try:  # requests нужен только для сетевого источника.
@@ -239,7 +241,7 @@ class InfluenzaFetchRequest(BaseModel):
         return normalize_city_slug(value)
 
     @model_validator(mode="after")
-    def _valid_interval(self) -> "InfluenzaFetchRequest":
+    def _valid_interval(self) -> InfluenzaFetchRequest:
         start = iso_week_start_date(self.begin_year, self.begin_week)
         end = iso_week_start_date(self.end_year, self.end_week)
         if end < start:
@@ -527,6 +529,63 @@ def parse_influenza_api_csv(
     return normalize_influenza_api_frame(raw)
 
 
+class StrainDoubleCountWarning(UserWarning):
+    """Колонка «A» похожа на все положительные на A, а не на A без субтипа (возможен двойной счёт)."""
+
+
+def check_unsubtyped_a(
+    frame: pd.DataFrame,
+    *,
+    a_col: str = "tested_strain_0",
+    subtype_cols: Sequence[str] = ("tested_strain_1", "tested_strain_2"),
+    other_cols: Sequence[str] = ("tested_strain_3",),
+    tested_col: str = "tested_total",
+    min_weeks: int = 10,
+    share_threshold: float = 0.8,
+    source: str = "",
+) -> dict[str, Any]:
+    """Проверить, что колонка A — грипп A *без* субтипа, а не все положительные на A.
+
+    Оценка гриппа суммирует A + A(H1N1)pdm09 + A(H3N2) + B: это верно, только если категории не
+    пересекаются. Если A — все положительные на A (субтипы — его подмножество), субтипированные случаи
+    считаются дважды. Признаки двойного счёта: на неделях с субтипами A почти всегда не меньше их суммы;
+    сумма всех категорий больше числа протестированных. В выгрузках db.influenza.spb.ru и общероссийской
+    выгрузке 2017/18 A = 0 на 76–91 % недель с субтипами — это несубтипированный остаток.
+    При подозрении выдаётся ``StrainDoubleCountWarning``; возвращается сводка проверки.
+    """
+
+    a = pd.to_numeric(frame[a_col], errors="coerce").fillna(0)
+    sub = sum(pd.to_numeric(frame[c], errors="coerce").fillna(0) for c in subtype_cols)
+    other = sum(pd.to_numeric(frame[c], errors="coerce").fillna(0) for c in other_cols)
+    tested = pd.to_numeric(frame[tested_col], errors="coerce")
+    active = sub > 0
+    n_active = int(active.sum())
+    share = float((a[active] >= sub[active]).mean()) if n_active else None
+    exceeds = int(((a + sub + other) > tested).fillna(False).sum())
+    # единичные недели, где сумма категорий больше числа проб, — ошибки ввода (Челябинск: 3 из 144);
+    # систематическое превышение — признак пересекающихся категорий
+    exceeds_share = exceeds / n_active if n_active else 0.0
+    suspected = bool(
+        n_active >= min_weeks and ((share is not None and share >= share_threshold) or exceeds_share >= 0.2)
+    )
+    result = {
+        "weeks_with_subtypes": n_active,
+        "share_a_not_less_than_subtypes": None if share is None else round(share, 3),
+        "weeks_sum_exceeds_tested": exceeds,
+        "suspected_double_count": suspected,
+    }
+    if suspected:
+        warnings.warn(
+            f"{source or 'ПЦР'}: колонка «A» похожа на все положительные на грипп A, а не на A без субтипа "
+            f"(A ≥ суммы субтипов на {share if share is not None else float('nan'):.0%} из {n_active} недель с субтипами; "
+            f"недель, где сумма категорий больше числа проб: {exceeds}). Оценка гриппа суммирует A и субтипы — "
+            "возможен двойной счёт. Проверьте описание полей выгрузки.",
+            StrainDoubleCountWarning,
+            stacklevel=2,
+        )
+    return result
+
+
 def normalize_influenza_api_frame(raw: pd.DataFrame) -> pd.DataFrame:
     """Нормализует сырой DataFrame influenza DB к контракту ``cases``."""
 
@@ -555,6 +614,7 @@ def normalize_influenza_api_frame(raw: pd.DataFrame) -> pd.DataFrame:
         df["population_age_group_4"] + df["population_age_group_5"]
     )
 
+    df.attrs["strain_check"] = check_unsubtyped_a(df, source="db.influenza")
     for strain_index in STRAIN_NAMES:
         tested_strain_col = f"tested_strain_{strain_index}"
         rel_col = f"rel_strain_{strain_index}"
@@ -723,10 +783,10 @@ def load_influenza_from_model_complex_object(
 
     request = InfluenzaFetchRequest(
         city=city_info.slug,
-        begin_year=int(begin_year if begin_year is not None else getattr(obj, "begin_year")),
-        begin_week=int(begin_week if begin_week is not None else getattr(obj, "begin_week")),
-        end_year=int(end_year if end_year is not None else getattr(obj, "end_year")),
-        end_week=int(end_week if end_week is not None else getattr(obj, "end_week")),
+        begin_year=int(begin_year if begin_year is not None else obj.begin_year),
+        begin_week=int(begin_week if begin_week is not None else obj.begin_week),
+        end_year=int(end_year if end_year is not None else obj.end_year),
+        end_week=int(end_week if end_week is not None else obj.end_week),
     )
     weekly = weekly_incidence_from_cases(cases)
     return InfluenzaFrameBundle(
@@ -772,7 +832,7 @@ def save_weekly_incidence_csv(
         city=info,
         start_date=frame["datetime"].iloc[0].date(),
         end_date=frame["datetime"].iloc[-1].date(),
-        row_count=int(len(frame)),
+        row_count=len(frame),
     )
 
 
@@ -819,31 +879,31 @@ __all__ = [
     "DEFAULT_INFLUENZA_DB_AUTH_TOKEN",
     "INFLUENZA_CASES_SCHEMA",
     "INFLUENZA_WEEKLY_SCHEMA",
-    "InfluenzaDataSourceError",
-    "CityResolutionError",
     "CityInfo",
+    "CityResolutionError",
+    "InfluenzaDataSourceError",
+    "InfluenzaDbClient",
     "InfluenzaDbConfig",
     "InfluenzaFetchRequest",
     "InfluenzaFrameBundle",
     "InfluenzaWeeklyOutput",
-    "InfluenzaDbClient",
     "ModelComplexInfluenzaDataLike",
-    "safe_city_slug",
-    "normalize_city_slug",
-    "resolve_city",
-    "list_supported_cities",
-    "iso_week_start_date",
-    "normalize_end_date",
-    "fetch_request_until_date",
     "build_influenza_db_url",
-    "fetch_influenza_csv_text",
-    "parse_influenza_api_csv",
-    "normalize_influenza_api_frame",
-    "weekly_incidence_from_cases",
-    "load_influenza_weekly_from_api",
-    "load_influenza_from_model_complex_object",
     "default_weekly_output_path",
-    "save_weekly_incidence_csv",
+    "fetch_influenza_csv_text",
+    "fetch_request_until_date",
+    "iso_week_start_date",
+    "list_supported_cities",
+    "load_influenza_from_model_complex_object",
+    "load_influenza_weekly_from_api",
+    "normalize_city_slug",
+    "normalize_end_date",
+    "normalize_influenza_api_frame",
+    "parse_influenza_api_csv",
+    "resolve_city",
+    "safe_city_slug",
     "save_influenza_bundle",
+    "save_weekly_incidence_csv",
+    "weekly_incidence_from_cases",
 ]
 

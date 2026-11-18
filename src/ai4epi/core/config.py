@@ -11,13 +11,14 @@ LLM-backend-и, настройки narrator/editor/runtime/evaluation слоёв
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ai4epi.core.sections import SectionRegistry
 from ai4epi.generation.editor import EditorSettings
-from ai4epi.quality.evaluation import DEFAULT_ENABLED_EVALUATORS, DEFAULT_EVAL_WEIGHTS, EvalConfig
 from ai4epi.generation.narrator import ChatBackend, NarratorSettings, make_chat_backend
 from ai4epi.generation.pipeline import (
     Ai4EpiPipeline,
@@ -27,9 +28,8 @@ from ai4epi.generation.pipeline import (
     create_pipeline,
     load_pipeline_registry,
 )
+from ai4epi.quality.evaluation import DEFAULT_ENABLED_EVALUATORS, DEFAULT_EVAL_WEIGHTS, EvalConfig
 from ai4epi.quality.runtime_checks import RuntimeCheckConfig, RuntimeChecker
-from ai4epi.core.sections import SectionRegistry
-
 
 JsonObject = dict[str, Any]
 ConfigFormat = Literal["json", "yaml", "yml"]
@@ -151,13 +151,13 @@ class Ai4EpiConfig(StrictModel):
     metadata_extra: JsonObject = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_editor_configuration(self) -> "Ai4EpiConfig":
+    def validate_editor_configuration(self) -> Ai4EpiConfig:
         if not self.pipeline_settings.run_editor and self.llm.editor is not None:
             # Это не ошибка: пользователь мог заранее описать editor backend.
             return self
         return self
 
-    def resolve_paths(self, base_dir: str | Path) -> "Ai4EpiConfig":
+    def resolve_paths(self, base_dir: str | Path) -> Ai4EpiConfig:
         """
         Вернуть копию конфигурации с путями, разрешёнными относительно base_dir.
 

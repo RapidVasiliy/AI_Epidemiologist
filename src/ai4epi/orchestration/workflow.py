@@ -24,10 +24,11 @@ workflow трактует конечную дату как последнюю ф
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
-import time
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -41,26 +42,26 @@ try:  # package import
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
-    from ai4epi.generation.bulletin import Bulletin, save_bulletin, save_bulletin_markdown
     from ai4epi.core.context import GlobalContext
-    from ai4epi.generation.editor import EditorRunResult, EditorSettings, edit_bulletin
-    from ai4epi.quality.evaluation import EvalConfig, EvalReport, evaluate_bulletin, save_eval_report
     from ai4epi.core.io import TableReadOptions, read_table, write_json
+    from ai4epi.generation.bulletin import Bulletin, save_bulletin, save_bulletin_markdown
+    from ai4epi.generation.editor import EditorRunResult, EditorSettings, edit_bulletin
     from ai4epi.generation.narrator import NarratorSettings, make_chat_backend
-    from ai4epi.output.pdf import PdfOutputConfig, PdfRenderResult, render_bulletin_pdf
-    from ai4epi.output.figures import build_publication_figure_assets
     from ai4epi.generation.pipeline import (
         PipelineOutputConfig,
         PipelineRunResult,
         PipelineSettings,
         run_pipeline_from_files,
     )
+    from ai4epi.output.figures import build_publication_figure_assets
+    from ai4epi.output.pdf import PdfOutputConfig, PdfRenderResult, render_bulletin_pdf
     from ai4epi.output.rendering import (
-        RenderOutputConfig,
         RenderedBulletin,
+        RenderOutputConfig,
         make_default_render_settings,
         render_bulletin_to_files,
     )
+    from ai4epi.quality.evaluation import EvalConfig, EvalReport, evaluate_bulletin, save_eval_report
 except ImportError:  # pragma: no cover - поддержка плоского исследовательского каталога.
     from ai4epi.analysis.analysis_pipeline import (  # type: ignore[no-redef]
         AnalysisOutputConfig,
@@ -70,26 +71,26 @@ except ImportError:  # pragma: no cover - поддержка плоского и
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
-    from ai4epi.generation.bulletin import Bulletin, save_bulletin, save_bulletin_markdown  # type: ignore[no-redef]
     from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
-    from ai4epi.generation.editor import EditorRunResult, EditorSettings, edit_bulletin  # type: ignore[no-redef]
-    from ai4epi.quality.evaluation import EvalConfig, EvalReport, evaluate_bulletin, save_eval_report  # type: ignore[no-redef]
     from ai4epi.core.io import TableReadOptions, read_table, write_json  # type: ignore[no-redef]
+    from ai4epi.generation.bulletin import Bulletin, save_bulletin, save_bulletin_markdown  # type: ignore[no-redef]
+    from ai4epi.generation.editor import EditorRunResult, EditorSettings, edit_bulletin  # type: ignore[no-redef]
     from ai4epi.generation.narrator import NarratorSettings, make_chat_backend  # type: ignore[no-redef]
-    from ai4epi.output.pdf import PdfOutputConfig, PdfRenderResult, render_bulletin_pdf  # type: ignore[no-redef]
-    from ai4epi.output.figures import build_publication_figure_assets  # type: ignore[no-redef]
     from ai4epi.generation.pipeline import (  # type: ignore[no-redef]
         PipelineOutputConfig,
         PipelineRunResult,
         PipelineSettings,
         run_pipeline_from_files,
     )
+    from ai4epi.output.figures import build_publication_figure_assets  # type: ignore[no-redef]
+    from ai4epi.output.pdf import PdfOutputConfig, PdfRenderResult, render_bulletin_pdf  # type: ignore[no-redef]
     from ai4epi.output.rendering import (  # type: ignore[no-redef]
-        RenderOutputConfig,
         RenderedBulletin,
+        RenderOutputConfig,
         make_default_render_settings,
         render_bulletin_to_files,
     )
+    from ai4epi.quality.evaluation import EvalConfig, EvalReport, evaluate_bulletin, save_eval_report  # type: ignore[no-redef]
 
 
 JsonObject = dict[str, Any]
@@ -182,7 +183,7 @@ class FullWorkflowSettings(StrictModel):
     stop_after_bulletin_failure: bool = True
 
     @model_validator(mode="after")
-    def validate_stage_dependencies(self) -> "FullWorkflowSettings":
+    def validate_stage_dependencies(self) -> FullWorkflowSettings:
         if self.run_editor and not self.run_bulletin:
             raise ValueError("run_editor=True требует run_bulletin=True.")
         if self.run_evaluation and not self.run_bulletin:

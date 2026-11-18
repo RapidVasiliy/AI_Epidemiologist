@@ -23,9 +23,10 @@ rolling-окна цели 4..9, rolling-окна температуры 4..7, Fo
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,6 @@ from pandas.api.types import is_numeric_dtype
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ai4epi.core.io import TableSchema, TableWriteOptions, write_table
-
 
 CalendarValidationMode = Literal["strict", "repair", "ignore"]
 
@@ -111,12 +111,32 @@ class FeatureEngineeringConfig(StrictModel):
     fourier_k: int = Field(default=2, ge=0, le=12)
     fourier_period: int = Field(default=52, ge=1)
     growth_lags: tuple[int, ...] = (1, 2, 4)
+    # Праздничные недели: регистрация систематически занижена (СПб, 1-я ISO-неделя — в
+    # среднем до 0.35 от соседних). holiday_adjust: модель учится на ряде, где такие недели
+    # заменены интерполяцией соседних (лаги и цели не искажены провалом), а прогноз на
+    # праздничную неделю умножается на долю её регистрации по прошлым сезонам города
+    # (holiday_reporting_ratio). holiday_features: календарные признаки holiday_lag_pos /
+    # holiday_ahead_pos; при min_samples_leaf порядка 100 и ~1 праздничной неделе в год
+    # деревья их не используют, поэтому по умолчанию выключены.
+    holiday_adjust: bool = True
+    # Прогнозы ARIMA с гармониками годового цикла на 1..H недель как признаки arima_h1..arima_hH
+    # (ai4epi.analysis.baselines.harmonic_arima_feature_matrix)
+    arima_features: bool = False
+    # Признаки ОРВИ (нужны столбцы ari_per_10k и ari_norm, ai4epi.data.ari_history.add_ari_columns):
+    # log(1 + ОРВИ на 10 тыс.) с лагами ari_lags, рост за 1 и 2 недели и отклонение от многолетней
+    # нормы этой недели ari_anom (лаги 0..2). Сами столбцы ari_per_10k / ari_norm признаками не являются.
+    ari_features: bool = False
+    ari_lags: tuple[int, ...] = (0, 1, 2, 3)
+    holiday_features: bool = False
+    holiday_iso_weeks: tuple[int, ...] = (1,)
     epidemic_dynamics_eps: float = Field(default=1e-6, gt=0)
     raw_columns_to_drop: tuple[str, ...] = (
         "total_population",
         "total_cases_formula",
         "rh_min",
         "rh_max",
+        # служебный флаг локальных данных (неделя без ПЦР), не признак модели
+        "pcr_imputed",
     )
     require_numeric_features: bool = True
     validate_weekly_frame: bool = True
@@ -141,7 +161,7 @@ class FeatureEngineeringConfig(StrictModel):
         return tuple(int(v) for v in value)
 
     @model_validator(mode="after")
-    def _validate_windows(self) -> "FeatureEngineeringConfig":
+    def _validate_windows(self) -> FeatureEngineeringConfig:
         if any(w <= 0 for w in self.y_roll_windows):
             raise ValueError("Окна rolling-статистик цели должны быть положительными.")
         if any(w <= 0 for w in self.temp_roll_windows):
@@ -175,6 +195,8 @@ class SupervisedDataset(StrictModel):
     valid_row_count: int = Field(ge=0)
     origin_index: int | None = Field(default=None, ge=0)
     origin_date: pd.Timestamp | None = None
+    # доля регистрации праздничной недели (медиана по прошлым сезонам), None — поправки нет
+    holiday_ratio: float | None = None
 
     @field_validator("data")
     @classmethod
@@ -568,6 +590,123 @@ def add_epidemic_dynamics_features(
     return out
 
 
+def is_holiday_week(dates: pd.Series | pd.DatetimeIndex, holiday_iso_weeks: Sequence[int] = (1,)) -> np.ndarray:
+    """Флаг праздничной недели по ISO-номеру недели даты."""
+
+    weeks = pd.DatetimeIndex(pd.to_datetime(dates)).isocalendar().week.to_numpy(int)
+    return np.isin(weeks, np.asarray(holiday_iso_weeks, dtype=int))
+
+
+def holiday_adjusted_series(
+    dates: pd.Series | pd.DatetimeIndex,
+    values: np.ndarray,
+    holiday_iso_weeks: Sequence[int] = (1,),
+) -> np.ndarray:
+    """Значения праздничных недель заменены линейной интерполяцией соседних недель.
+
+    Последняя неделя ряда, если она праздничная, заменяется значением предыдущей недели
+    (следующая ещё неизвестна): данные после неё не используются.
+    """
+
+    values = np.asarray(values, dtype=float)
+    holiday = is_holiday_week(dates, holiday_iso_weeks)
+    if not holiday.any():
+        return values.copy()
+    series = pd.Series(np.where(holiday, np.nan, values))
+    return series.interpolate(limit_area="inside").ffill().bfill().to_numpy(float)
+
+
+def holiday_reporting_ratio(
+    dates: pd.Series | pd.DatetimeIndex,
+    values: np.ndarray,
+    holiday_iso_weeks: Sequence[int] = (1,),
+    *,
+    min_level: float = 1.0,
+    min_seasons: int = 3,
+    bounds: tuple[float, float] = (0.1, 1.5),
+) -> float | None:
+    """Медиана отношения «праздничная неделя / среднее соседних» по прошлым сезонам.
+
+    Учитываются праздничные недели с обеими соседними неделями в ряду и средним соседей не
+    ниже ``min_level`` (иначе отношение — шум). Меньше ``min_seasons`` таких недель — ``None``.
+    """
+
+    values = np.asarray(values, dtype=float)
+    holiday = is_holiday_week(dates, holiday_iso_weeks)
+    ratios = []
+    for i in np.flatnonzero(holiday):
+        if 0 < i < len(values) - 1 and not holiday[i - 1] and not holiday[i + 1]:
+            base = (values[i - 1] + values[i + 1]) / 2
+            if np.isfinite(base) and base >= min_level and np.isfinite(values[i]):
+                ratios.append(values[i] / base)
+    if len(ratios) < min_seasons:
+        return None
+    return float(np.clip(np.median(ratios), *bounds))
+
+
+def apply_holiday_ratio(
+    values: np.ndarray,
+    target_dates: Sequence[pd.Timestamp] | pd.DatetimeIndex,
+    ratio: float | None,
+    holiday_iso_weeks: Sequence[int] = (1,),
+) -> np.ndarray:
+    """Прогноз на праздничные недели умножается на долю их регистрации ``ratio``."""
+
+    out = np.asarray(values, dtype=float).copy()
+    if ratio is None:
+        return out
+    mask = is_holiday_week(pd.DatetimeIndex(target_dates), holiday_iso_weeks)
+    out[mask] *= ratio
+    return out
+
+
+def add_holiday_features(
+    data: pd.DataFrame,
+    *,
+    datetime_col: str = "datetime",
+    holiday_iso_weeks: Sequence[int] = (1,),
+    max_lag: int = 5,
+    horizons: int = 4,
+) -> pd.DataFrame:
+    """Признаки праздничных недель по календарю (без заглядывания в данные будущего).
+
+    ``holiday_lag_pos`` — k ∈ [0, max_lag], если неделя t−k праздничная (наименьшее k), иначе −1;
+    ``holiday_ahead_pos`` — h ∈ [1, horizons], если неделя t+h праздничная (наименьшее h), иначе 0.
+    """
+
+    out = data.copy()
+    when = pd.to_datetime(out[datetime_col])
+    lag = np.full(len(out), -1)
+    for k in range(max_lag, -1, -1):
+        lag = np.where(is_holiday_week(when - pd.Timedelta(weeks=k), holiday_iso_weeks), k, lag)
+    ahead = np.zeros(len(out), dtype=int)
+    for h in range(horizons, 0, -1):
+        ahead = np.where(is_holiday_week(when + pd.Timedelta(weeks=h), holiday_iso_weeks), h, ahead)
+    out["holiday_lag_pos"] = lag
+    out["holiday_ahead_pos"] = ahead
+    return out
+
+
+ARI_RAW_COLUMNS: tuple[str, ...] = ("ari_per_10k", "ari_norm")
+
+
+def add_ari_features(data: pd.DataFrame, lags: Sequence[int] = (0, 1, 2, 3)) -> pd.DataFrame:
+    """Признаки ОРВИ: ``ari_lag_k`` = log(1 + ОРВИ), ``ari_growth_1/2``, ``ari_anom_lag_k`` (k = 0..2).
+
+    Отклонение от нормы при её отсутствии (меньше 3 прошлых лет) — 0: строка не теряется.
+    """
+
+    _require_columns(data, list(ARI_RAW_COLUMNS), frame_name="model input frame (ari_features)")
+    out = data.copy()
+    z = np.log1p(pd.to_numeric(out["ari_per_10k"], errors="coerce").clip(lower=0))
+    anom = (z - pd.to_numeric(out["ari_norm"], errors="coerce")).fillna(0.0)
+    anom = anom.where(z.notna())
+    new = {f"ari_lag_{k}": z.shift(k) for k in lags}
+    new |= {f"ari_growth_{k}": z - z.shift(k) for k in (1, 2)}
+    new |= {f"ari_anom_lag_{k}": anom.shift(k) for k in (0, 1, 2)}
+    return pd.concat([out, pd.DataFrame(new, index=out.index)], axis=1)
+
+
 def build_supervised(
     df: pd.DataFrame,
     *,
@@ -602,6 +741,12 @@ def build_supervised(
         frame_name="model input frame",
     )
     _coerce_numeric_columns(data, [cfg.target_col, cfg.iso_year_col, cfg.iso_week_col, *cfg.temp_cols])
+    holiday_ratio: float | None = None
+    if cfg.holiday_adjust:
+        observed = data[cfg.target_col].to_numpy(float)
+        holiday_ratio = holiday_reporting_ratio(data[cfg.datetime_col], observed, cfg.holiday_iso_weeks)
+        data["y_observed"] = observed
+        data[cfg.target_col] = holiday_adjusted_series(data[cfg.datetime_col], observed, cfg.holiday_iso_weeks)
 
     data = add_fourier_week_features(
         data,
@@ -618,6 +763,25 @@ def build_supervised(
         eps=cfg.epidemic_dynamics_eps,
     )
 
+    if cfg.arima_features:
+        from ai4epi.analysis.baselines import harmonic_arima_feature_matrix
+
+        arima = harmonic_arima_feature_matrix(data[cfg.datetime_col], data[cfg.target_col].to_numpy(float), cfg.horizons)
+        for h in range(cfg.horizons):
+            data[f"arima_h{h + 1}"] = arima[:, h]
+
+    if cfg.ari_features:
+        data = add_ari_features(data, cfg.ari_lags)
+
+    if cfg.holiday_features:
+        data = add_holiday_features(
+            data,
+            datetime_col=cfg.datetime_col,
+            holiday_iso_weeks=cfg.holiday_iso_weeks,
+            max_lag=max(cfg.y_lags) if cfg.y_lags else 0,
+            horizons=cfg.horizons,
+        )
+
     for temp_col in cfg.temp_cols:
         data = make_lag_features(data, temp_col, cfg.temp_lags, prefix=temp_col)
         data = make_rolling_features(data, temp_col, cfg.temp_roll_windows, prefix=temp_col)
@@ -629,6 +793,8 @@ def build_supervised(
     drop_cols = {
         cfg.datetime_col,
         cfg.target_col,
+        "y_observed",
+        *ARI_RAW_COLUMNS,
         *cfg.raw_columns_to_drop,
         *target_cols,
     }
@@ -661,6 +827,7 @@ def build_supervised(
         valid_row_count=int(valid_mask.sum()),
         origin_index=origin_index,
         origin_date=origin_date,
+        holiday_ratio=holiday_ratio,
     )
 
 
@@ -718,7 +885,11 @@ def infer_feature_column_groups(
     """Разложить признаки по группам для отчётности и explainability."""
 
     features = tuple(feature_cols)
-    calendar = tuple(c for c in features if c in {"iso_year", "iso_week"} or c.startswith("sin_w") or c.startswith("cos_w"))
+    calendar = tuple(
+        c
+        for c in features
+        if c in {"iso_year", "iso_week"} or c.startswith(("sin_w", "cos_w", "holiday_"))
+    )
     target_lags = tuple(c for c in features if c.startswith("y_lag"))
     target_rolling = tuple(c for c in features if c.startswith("y_roll"))
     target_dynamics = tuple(c for c in features if c.startswith("y_diff") or c == "y_accel")
@@ -831,31 +1002,31 @@ def _validate_unique_non_negative_names(values: tuple[str, ...], *, field_name: 
 
 
 __all__ = [
+    "WEATHER_WEEKLY_SCHEMA",
+    "WEEKLY_MODEL_INPUT_SCHEMA",
     "CalendarValidationMode",
-    "PreprocessingError",
-    "WeeklyFrameError",
-    "FeatureEngineeringError",
-    "PreprocessingConfigError",
-    "WeeklyFrameConfig",
-    "WeatherAggregationConfig",
+    "FeatureColumnGroups",
     "FeatureEngineeringConfig",
+    "FeatureEngineeringError",
     "HoldoutSplitConfig",
+    "PreprocessingConfigError",
+    "PreprocessingError",
     "SupervisedDataset",
     "TimeHoldoutSplit",
-    "FeatureColumnGroups",
-    "WEEKLY_MODEL_INPUT_SCHEMA",
-    "WEATHER_WEEKLY_SCHEMA",
-    "normalize_weekly_frame",
-    "aggregate_hourly_weather_to_weekly",
-    "merge_weekly_influenza_weather",
+    "WeatherAggregationConfig",
+    "WeeklyFrameConfig",
+    "WeeklyFrameError",
+    "add_epidemic_dynamics_features",
     "add_fourier_week_features",
+    "aggregate_hourly_weather_to_weekly",
+    "build_supervised",
+    "infer_feature_column_groups",
     "make_lag_features",
     "make_rolling_features",
-    "add_epidemic_dynamics_features",
-    "build_supervised",
     "make_time_holdout_split",
-    "infer_feature_column_groups",
-    "supervised_to_feature_list_frame",
+    "merge_weekly_influenza_weather",
+    "normalize_weekly_frame",
     "save_supervised_dataset",
+    "supervised_to_feature_list_frame",
 ]
 

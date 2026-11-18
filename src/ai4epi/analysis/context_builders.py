@@ -13,19 +13,20 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
+from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai4epi.core.context import GlobalContext, save_global_context
 from ai4epi.analysis.forecasting import ForecastRunResult
-
+from ai4epi.core.context import GlobalContext, save_global_context
 
 JsonObject = dict[str, Any]
 
@@ -120,7 +121,7 @@ class ContextBuildConfig(StrictModel):
     require_epidemic_wave_comparison: bool = True
 
     @model_validator(mode="after")
-    def validate_uncertainty_thresholds(self) -> "ContextBuildConfig":
+    def validate_uncertainty_thresholds(self) -> ContextBuildConfig:
         if self.uncertainty_high_pct_threshold < self.uncertainty_low_pct_threshold:
             raise ValueError("uncertainty_high_pct_threshold должен быть не ниже uncertainty_low_pct_threshold.")
         if self.uncertainty_very_high_pct_threshold < self.uncertainty_high_pct_threshold:
@@ -609,7 +610,7 @@ def _direction_sequence(values: Sequence[float], *, threshold_pct: float) -> lis
 
     arr = _finite_1d(values, name="values")
     directions: list[BaseTrendCode] = []
-    for prev, curr in zip(arr[:-1], arr[1:]):
+    for prev, curr in itertools.pairwise(arr):
         directions.append(classify_change(_safe_relative_change_pct(float(curr), float(prev)), threshold_pct=threshold_pct))
     return directions
 
@@ -922,9 +923,8 @@ def _notebook_compatible_shap_group(feature_ids: Sequence[str], *, fallback: Any
     ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
     if ordered[0][1] == 0:
         return str(fallback) if fallback is not None else "other"
-    if len(ordered) > 1 and ordered[0][1] == ordered[1][1]:
-        if fallback is not None:
-            return _notebook_compatible_shap_group([], fallback=fallback)
+    if len(ordered) > 1 and ordered[0][1] == ordered[1][1] and fallback is not None:
+        return _notebook_compatible_shap_group([], fallback=fallback)
     return ordered[0][0]
 
 
@@ -1002,7 +1002,7 @@ def _has_internal_direction_changes(values: Sequence[float], *, threshold_pct: f
     arr = _finite_1d(values, name="values")
     has_rise = False
     has_decline = False
-    for prev, curr in zip(arr[:-1], arr[1:]):
+    for prev, curr in itertools.pairwise(arr):
         code = classify_change(_safe_relative_change_pct(float(curr), float(prev)), threshold_pct=threshold_pct)
         has_rise = has_rise or code == "increase"
         has_decline = has_decline or code == "decrease"
@@ -1061,7 +1061,7 @@ def _context_payload_object(value: Any, *, block_name: str) -> JsonObject:
     if hasattr(value, "to_context_payload"):
         return _json_object(value.to_context_payload())
     if hasattr(value, "bundle"):
-        return _json_object(getattr(value, "bundle"))
+        return _json_object(value.bundle)
     return _json_object(value)
 
 
@@ -1105,13 +1105,13 @@ __all__ = [
     "ContextBuilderError",
     "ContextOutputConfig",
     "MissingContextBlockError",
+    "build_age_group_season_context",
     "build_current_situation_context",
+    "build_epidemic_wave_comparison_context",
     "build_forecast_context",
     "build_global_context",
     "build_global_context_payload",
     "build_global_context_result",
-    "build_epidemic_wave_comparison_context",
-    "build_age_group_season_context",
     "build_model_info_context",
     "build_model_quality_context",
     "build_origin_context",

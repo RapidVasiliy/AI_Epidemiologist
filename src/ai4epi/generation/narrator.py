@@ -18,12 +18,12 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Mapping, Protocol, Sequence
+from typing import Any, Literal, Protocol
 
 from ai4epi.core.context import GlobalContext
 from ai4epi.core.sections import SectionConfig, SectionRegistry
-
 
 JsonObject = dict[str, Any]
 ChatMessage = Mapping[str, str]

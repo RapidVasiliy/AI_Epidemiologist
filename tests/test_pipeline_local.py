@@ -24,9 +24,11 @@ def analysis(data_dir, tmp_path_factory):
     result = run_analysis_pipeline(
         influenza_weekly=bundle.weekly,
         age_group_frame=bundle.cases,
-        settings=AnalysisPipelineSettings(require_weather=False, run_mechanistic_wave=True, raise_on_error=True),
+        settings=AnalysisPipelineSettings(
+            require_weather=False, run_mechanistic_wave=True, run_age_group_forecast=True, raise_on_error=True
+        ),
         feature_config=FeatureEngineeringConfig(temp_cols=()),
-        mechanistic_wave_config=MechanisticWaveConfig(method="annealing"),
+        mechanistic_wave_config=MechanisticWaveConfig(method="annealing", age_groups=True),
         output=AnalysisOutputConfig(output_dir=out),
     )
     return result, out
@@ -86,3 +88,21 @@ def test_section_skipped_without_block(analysis):
 
     ctx = GlobalContext.model_validate(json.loads(json.dumps(data)))
     assert not default_section_registry().get("mechanistic_wave").is_available(ctx)
+
+
+def test_age_group_blocks_and_section(analysis):
+    result, out = analysis
+    ctx = result.context
+    mech_age = ctx.get_block("mechanistic_wave")["age_groups"]
+    assert [g["age_group_code"] for g in mech_age["groups"]] == ["age_0_14", "age_15_plus"]
+    assert all(g["fit_r2_in_sample"] > 0.5 for g in mech_age["groups"])
+    age_fc = ctx.get_block("age_group_forecast")
+    for group in age_fc["groups"]:
+        assert len(group["horizons"]) == 4
+        assert group["mechanistic"] is not None
+        assert group["mechanistic"]["comparison_with_ml"]["agreement_code"] in {"agree", "disagree"}
+    section = default_section_registry().get("age_group_forecast")
+    assert section.is_available(ctx)
+    section.build_user_payload(ctx)
+    assets = build_publication_figure_assets(context=ctx, analysis_artifacts=result.artifacts, output_dir=out / "figures_age")
+    assert "age_group_forecast_plot" in assets

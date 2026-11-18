@@ -27,24 +27,26 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ai4epi.core.io import TableWriteOptions, write_table
 from ai4epi.analysis.preprocessing import (
     FeatureEngineeringConfig,
     HoldoutSplitConfig,
     SupervisedDataset,
     TimeHoldoutSplit,
+    apply_holiday_ratio,
     build_supervised,
     make_time_holdout_split,
     supervised_to_feature_list_frame,
 )
+from ai4epi.core.io import TableWriteOptions, write_table
 
 try:  # pragma: no cover - отсутствие sklearn проверяется интеграционным окружением.
     from sklearn.ensemble import HistGradientBoostingRegressor
@@ -94,8 +96,14 @@ class HistGradientBoostingPointConfig(StrictModel):
     loss: Literal["poisson", "squared_error", "absolute_error", "gamma"] = "poisson"
     max_depth: int | None = None
     max_leaf_nodes: int | None = None
-    learning_rate: float = Field(default=0.001, gt=0)
-    max_iter: int = Field(default=8000, ge=1)
+    # По умолчанию — «быстрый» режим: learning_rate 0.03, 300 итераций. Скользящий
+    # бэктест на 5 сезонах (docs/backtest.md) показал ту же точность, что у
+    # исходных 0.001 × 8000 (R² 0.802 / 0.438 / 0.620 против 0.812 / 0.425 / 0.624
+    # в СПб), при обучении в ~20 раз быстрее. Исходный режим: legacy_point_config().
+    # Примечание: early_stopping при validation_fraction=None в sklearn оценивает
+    # потери на обучающей выборке и фактически не останавливает обучение.
+    learning_rate: float = Field(default=0.03, gt=0)
+    max_iter: int = Field(default=300, ge=1)
     min_samples_leaf: int = Field(default=95, ge=1)
     l2_regularization: float = Field(default=1.0, ge=0)
     early_stopping: bool = True
@@ -146,8 +154,32 @@ class HistGradientBoostingQuantileConfig(StrictModel):
         }
 
 
+def legacy_point_config() -> HistGradientBoostingPointConfig:
+    """Исходные параметры point-модели из notebook (learning_rate 0.001, 8000 итераций)."""
+
+    return HistGradientBoostingPointConfig(learning_rate=0.001, max_iter=8000)
+
+
+IntervalScaling = Literal["absolute", "level"]
+
+
+def conformal_method_label(scaling: str) -> str:
+    return "split_conformal_level_scaled_residual" if scaling == "level" else "split_conformal_absolute_residual"
+
+
 class ForecastingConfig(StrictModel):
-    """Настройки полного forecasting-pass."""
+    """Настройки полного forecasting-pass.
+
+    ``interval_scaling`` (для conformal-интервалов):
+
+    * ``"level"`` (по умолчанию) — радиус пропорционален текущему уровню:
+      квантиль ``|e| / (y_t + c)`` по калибровочному блоку умножается на
+      ``y_t + c`` недели прогноза (``c = interval_level_offset``). По бэктесту
+      на 5 сезонах покрытие 80 % интервала — 0.83 на эпидемической волне и 0.84
+      вне её;
+    * ``"absolute"`` — исходный вариант ``y_hat ± radius_h``: покрытие 0.50 на
+      волне и 0.94 вне её (среднее за год 0.82).
+    """
 
     horizons: int = Field(default=4, ge=1, le=52)
     test_weeks: int = Field(default=52, ge=1)
@@ -157,6 +189,8 @@ class ForecastingConfig(StrictModel):
     target_transform: TargetTransformName = "none"
     interval_method: IntervalMethod = "conformal"
     interval_alpha: float = Field(default=0.20, gt=0.0, lt=1.0)
+    interval_scaling: IntervalScaling = "level"
+    interval_level_offset: float = Field(default=1.0, gt=0.0)
     calib_weeks: int = Field(default=52, ge=1)
     conformal_refit_on_train_plus_calib: bool = True
     quantiles: tuple[float, float] = (0.10, 0.90)
@@ -180,7 +214,7 @@ class ForecastingConfig(StrictModel):
         return lower, upper
 
     @model_validator(mode="after")
-    def validate_point_loss_with_transform(self) -> "ForecastingConfig":
+    def validate_point_loss_with_transform(self) -> ForecastingConfig:
         # Poisson loss в sklearn требует неотрицательную целевую переменную.
         # log1p-преобразование сохраняет неотрицательность при исходном y >= 0.
         if self.point_model.loss == "poisson" and self.target_transform not in {"none", "log1p"}:
@@ -692,6 +726,7 @@ def run_forecast(
 
     q_models_prod: dict[float, list[Any]] = {}
     conformal_radii: np.ndarray | None = None
+    relative_radii: np.ndarray | None = None
     interval_metrics: pd.DataFrame | None = None
     test_lo_mat: np.ndarray | None = None
     test_hi_mat: np.ndarray | None = None
@@ -769,11 +804,22 @@ def run_forecast(
             inverse=transform.inverse,
             clip_non_negative=cfg.clip_predictions_to_non_negative,
         )
-        conformal_radii = compute_conformal_radii(
-            conformal_split.y_calib,
-            y_calib_pred,
-            alpha=cfg.interval_alpha,
-        )
+        target_values = supervised.data_valid[cfg.target_col].to_numpy(dtype=float)
+        c = cfg.interval_level_offset
+        if cfg.interval_scaling == "level":
+            calib_level = target_values[conformal_split.calib_mask.to_numpy(bool)] + c
+            relative_radii = compute_conformal_radii(
+                conformal_split.y_calib / calib_level[:, None],
+                y_calib_pred / calib_level[:, None],
+                alpha=cfg.interval_alpha,
+            )
+        else:
+            relative_radii = None
+            conformal_radii = compute_conformal_radii(
+                conformal_split.y_calib,
+                y_calib_pred,
+                alpha=cfg.interval_alpha,
+            )
 
         prod_data = supervised.data_valid
         X_prod = prod_data.loc[:, list(supervised.feature_cols)].to_numpy(dtype=float)
@@ -787,17 +833,26 @@ def run_forecast(
             random_state=cfg.random_state,
         )
 
-        test_lo_mat, test_hi_mat = apply_symmetric_intervals(
-            y_pred_mat,
-            conformal_radii,
-            clip_non_negative=cfg.clip_predictions_to_non_negative,
-        )
+        if relative_radii is not None:
+            test_level = target_values[-len(y_pred_mat):] + c
+            radius_mat = test_level[:, None] * relative_radii[None, :]
+            test_lo_mat = y_pred_mat - radius_mat
+            test_hi_mat = y_pred_mat + radius_mat
+            if cfg.clip_predictions_to_non_negative:
+                test_lo_mat = np.clip(test_lo_mat, 0.0, None)
+                test_hi_mat = np.clip(test_hi_mat, 0.0, None)
+        else:
+            test_lo_mat, test_hi_mat = apply_symmetric_intervals(
+                y_pred_mat,
+                conformal_radii,
+                clip_non_negative=cfg.clip_predictions_to_non_negative,
+            )
         per_h_pi, overall_pi = evaluate_intervals(split.y_test, test_lo_mat, test_hi_mat)
         interval_metrics = build_interval_metrics_table(
             per_h=per_h_pi,
             overall=overall_pi,
             alpha=cfg.interval_alpha,
-            method="split_conformal_absolute_residual",
+            method=conformal_method_label(cfg.interval_scaling),
             stage="test_eval_model",
         )
     else:
@@ -845,6 +900,10 @@ def run_forecast(
         y_hat = np.clip(y_hat, 0.0, None)
 
     if cfg.interval_method == "conformal":
+        if relative_radii is not None:
+            origin_level = float(supervised.data[cfg.target_col].iloc[supervised.origin_index]) + cfg.interval_level_offset
+            # эффективный радиус для текущего прогноза (в единицах целевой переменной)
+            conformal_radii = relative_radii * origin_level
         if conformal_radii is None:
             raise ForecastingError("conformal_radii не рассчитаны.")
         y_lo = y_hat - conformal_radii
@@ -874,6 +933,13 @@ def run_forecast(
     if pd.isna(origin_date):
         raise ForecastingError("origin_date не определён: невозможно построить production forecast.")
     future_dates = infer_future_dates(supervised.data, origin_date, cfg.horizons, datetime_col=cfg.datetime_col)
+    if supervised.holiday_ratio is not None:
+        # модель прогнозирует ряд без праздничного провала; регистрацию праздничной недели
+        # возвращаем долей, оценённой по прошлым сезонам (ai4epi.analysis.preprocessing)
+        weeks = supervised.config.holiday_iso_weeks
+        y_hat = apply_holiday_ratio(y_hat, future_dates, supervised.holiday_ratio, weeks)
+        y_lo = apply_holiday_ratio(y_lo, future_dates, supervised.holiday_ratio, weeks)
+        y_hi = apply_holiday_ratio(y_hi, future_dates, supervised.holiday_ratio, weeks)
 
     model_registry = build_model_registry(
         point_models=models_prod,
@@ -889,6 +955,8 @@ def run_forecast(
         calib_weeks=cfg.calib_weeks,
         conformal_radii=conformal_radii,
         conformal_refit_on_train_plus_calib=cfg.conformal_refit_on_train_plus_calib,
+        conformal_method=conformal_method_label(cfg.interval_scaling),
+        relative_radii=relative_radii,
     )
 
     tables = build_forecast_tables(
@@ -1011,7 +1079,9 @@ def build_forecast_tables(
         target_col=config.target_col,
     )
     conformal_radii_table = (
-        build_conformal_radii_table(conformal_radii, alpha=config.interval_alpha)
+        build_conformal_radii_table(
+            conformal_radii, alpha=config.interval_alpha, method=conformal_method_label(config.interval_scaling)
+        )
         if conformal_radii is not None
         else None
     )
@@ -1026,7 +1096,9 @@ def build_forecast_tables(
     )
 
 
-def build_conformal_radii_table(radii: np.ndarray, *, alpha: float = 0.20) -> pd.DataFrame:
+def build_conformal_radii_table(
+    radii: np.ndarray, *, alpha: float = 0.20, method: str = "split_conformal_absolute_residual"
+) -> pd.DataFrame:
     """Собрать таблицу conformal-радиусов по горизонтам."""
 
     r = _validate_1d_array(radii, name="conformal_radii")
@@ -1036,7 +1108,7 @@ def build_conformal_radii_table(radii: np.ndarray, *, alpha: float = 0.20) -> pd
             "radius": r,
             "alpha": float(alpha),
             "nominal_coverage": 1.0 - float(alpha),
-            "method": "split_conformal_absolute_residual",
+            "method": method,
         }
     )
 
@@ -1399,6 +1471,7 @@ def _build_conformal_interval_entry(
     alpha: float,
     target_variable: str,
     time_unit: str,
+    method: str = "split_conformal_absolute_residual",
 ) -> dict[str, Any]:
     """Собрать запись conformal-интервала для model_registry."""
 
@@ -1412,7 +1485,7 @@ def _build_conformal_interval_entry(
         "target_time_unit": time_unit,
         "predicts": f"{target_variable} interval at t+{horizon}",
         "training_strategy": "direct_point_model_plus_calibration_residuals",
-        "interval_method": "split_conformal_absolute_residual",
+        "interval_method": method,
         "alpha": float(alpha),
         "nominal_coverage": 1.0 - float(alpha),
         "radius": float(radius),
@@ -1436,6 +1509,8 @@ def build_model_registry(
     calib_weeks: int | None = 52,
     conformal_radii: np.ndarray | None = None,
     conformal_refit_on_train_plus_calib: bool = True,
+    conformal_method: str = "split_conformal_absolute_residual",
+    relative_radii: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Построить model_registry, совместимый с notebook и conformal-режимом."""
 
@@ -1449,7 +1524,7 @@ def build_model_registry(
     interval_design: dict[str, Any]
     if interval_method == "quantile":
         q_models = quantile_models or {}
-        quantile_keys = sorted(float(q) for q in q_models.keys())
+        quantile_keys = sorted(float(q) for q in q_models)
         if len(quantile_keys) < 2:
             raise ForecastingError("quantile_models должен содержать минимум два квантиля.")
         for q in quantile_keys:
@@ -1482,10 +1557,12 @@ def build_model_registry(
                     alpha=interval_alpha,
                     target_variable=target_variable,
                     time_unit=time_unit,
+                    method=conformal_method,
                 )
             )
         interval_design = {
-            "method": "split_conformal_absolute_residual",
+            "method": conformal_method,
+            "relative_radius_by_horizon": [float(v) for v in relative_radii] if relative_radii is not None else None,
             "alpha": float(interval_alpha),
             "nominal_coverage": 1.0 - float(interval_alpha),
             "calib_weeks": int(calib_weeks) if calib_weeks is not None else None,
@@ -1616,42 +1693,42 @@ def _require_sklearn() -> None:
 
 
 __all__ = [
-    "TargetTransformName",
-    "ForecastModelFamily",
-    "IntervalMethod",
-    "ForecastingError",
-    "ForecastingConfigError",
-    "ModelTrainingError",
+    "ConformalCalibrationSplit",
     "ForecastArtifactError",
+    "ForecastMetrics",
+    "ForecastModelFamily",
+    "ForecastOutputConfig",
+    "ForecastRunResult",
+    "ForecastTables",
+    "ForecastingConfig",
+    "ForecastingConfigError",
+    "ForecastingError",
     "HistGradientBoostingPointConfig",
     "HistGradientBoostingQuantileConfig",
-    "ForecastingConfig",
-    "ForecastOutputConfig",
-    "ForecastMetrics",
-    "ForecastTables",
-    "ForecastRunResult",
-    "ConformalCalibrationSplit",
+    "IntervalMethod",
+    "ModelTrainingError",
     "TargetTransform",
-    "get_target_transform",
+    "TargetTransformName",
+    "build_conformal_radii_table",
+    "build_forecast_next_table",
+    "build_forecast_tables",
+    "build_history_plus_forecast_table",
+    "build_interval_metrics_table",
+    "build_metrics_summary_table",
+    "build_model_registry",
+    "build_test_predictions_table",
+    "compute_conformal_radii",
+    "conformal_radius_from_abs_errors",
+    "evaluate_intervals",
+    "evaluate_multistep",
     "fit_models_hist_gbdt",
     "fit_models_hist_gbdt_quantiles",
-    "evaluate_multistep",
-    "evaluate_intervals",
-    "conformal_radius_from_abs_errors",
-    "compute_conformal_radii",
+    "get_target_transform",
+    "infer_future_dates",
     "make_conformal_calibration_split",
     "predict_matrix",
     "run_forecast",
     "run_forecast_from_frame",
-    "build_forecast_tables",
-    "build_metrics_summary_table",
-    "build_conformal_radii_table",
-    "build_interval_metrics_table",
-    "build_test_predictions_table",
-    "build_forecast_next_table",
-    "build_history_plus_forecast_table",
-    "infer_future_dates",
     "save_forecast_artifacts",
-    "build_model_registry",
 ]
 

@@ -16,7 +16,9 @@
     -> ``ShapRunResult``
     -> ``EpidemicWaveRunResult``
     -> optional ``AgeGroupSeasonRunResult``
-    -> optional ``MechanisticWaveRunResult`` (модель Барояна–Рвачёва)
+    -> ``data_quality`` (качество данных, сравнение с наивными прогнозами)
+    -> optional ``AgeGroupForecastRunResult`` (ML-прогноз по возрастным группам)
+    -> optional ``MechanisticWaveRunResult`` (модель Барояна–Рвачёва, в т. ч. по возрастам)
     -> ``ContextBuildResult``.
 
 Два уровня API:
@@ -28,28 +30,27 @@
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from datetime import date, datetime
 from pathlib import Path
-import time
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:  # package import
+    from ai4epi.analysis.age_group_forecast import (
+        AgeGroupForecastConfig,
+        AgeGroupForecastOutputConfig,
+        AgeGroupForecastRunResult,
+        run_age_group_forecast,
+    )
     from ai4epi.analysis.age_group_season import (
         AgeGroupSeasonConfig,
         AgeGroupSeasonOutputConfig,
         AgeGroupSeasonRunResult,
         run_age_group_season_analysis,
-    )
-    from ai4epi.core.context import GlobalContext
-    from ai4epi.analysis.mechanistic_wave import (
-        MechanisticWaveConfig,
-        MechanisticWaveOutputConfig,
-        MechanisticWaveRunResult,
-        ml_forecast_from_result,
-        run_mechanistic_wave_analysis,
     )
     from ai4epi.analysis.context_builders import (
         ContextBuildConfig,
@@ -57,12 +58,7 @@ try:  # package import
         ContextOutputConfig,
         build_global_context_result,
     )
-    from ai4epi.data.influenza import (
-        InfluenzaDbConfig,
-        InfluenzaFrameBundle,
-        load_influenza_weekly_from_api,
-        save_influenza_bundle,
-    )
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.epidemic_waves import (
         EpidemicWaveConfig,
         EpidemicWaveOutputConfig,
@@ -81,7 +77,13 @@ try:  # package import
         ForecastRunResult,
         run_forecast,
     )
-    from ai4epi.core.io import TableWriteOptions, write_json, write_table
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.preprocessing import (
         FeatureEngineeringConfig,
         SupervisedDataset,
@@ -93,6 +95,14 @@ try:  # package import
         normalize_weekly_frame,
         save_supervised_dataset,
     )
+    from ai4epi.core.context import GlobalContext
+    from ai4epi.core.io import TableWriteOptions, write_json, write_table
+    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.data.influenza import (
+        InfluenzaDbConfig,
+        load_influenza_weekly_from_api,
+        save_influenza_bundle,
+    )
     from ai4epi.data.weather import (
         WeatherApiConfig,
         WeatherFrameBundle,
@@ -101,19 +111,17 @@ try:  # package import
         save_weather_bundle,
     )
 except ImportError:  # pragma: no cover - compatibility with current notebook-like flat layout
+    from ai4epi.analysis.age_group_forecast import (
+        AgeGroupForecastConfig,
+        AgeGroupForecastOutputConfig,
+        AgeGroupForecastRunResult,
+        run_age_group_forecast,
+    )
     from ai4epi.analysis.age_group_season import (  # type: ignore[no-redef]
         AgeGroupSeasonConfig,
         AgeGroupSeasonOutputConfig,
         AgeGroupSeasonRunResult,
         run_age_group_season_analysis,
-    )
-    from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
-    from ai4epi.analysis.mechanistic_wave import (
-        MechanisticWaveConfig,
-        MechanisticWaveOutputConfig,
-        MechanisticWaveRunResult,
-        ml_forecast_from_result,
-        run_mechanistic_wave_analysis,
     )
     from ai4epi.analysis.context_builders import (  # type: ignore[no-redef]
         ContextBuildConfig,
@@ -121,12 +129,7 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         ContextOutputConfig,
         build_global_context_result,
     )
-    from ai4epi.data.influenza import (  # type: ignore[no-redef]
-        InfluenzaDbConfig,
-        InfluenzaFrameBundle,
-        load_influenza_weekly_from_api,
-        save_influenza_bundle,
-    )
+    from ai4epi.analysis.data_quality import DataQualityConfig, add_reliability_reason, build_data_quality_block
     from ai4epi.analysis.epidemic_waves import (  # type: ignore[no-redef]
         EpidemicWaveConfig,
         EpidemicWaveOutputConfig,
@@ -145,7 +148,13 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         ForecastRunResult,
         run_forecast,
     )
-    from ai4epi.core.io import TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
+    from ai4epi.analysis.mechanistic_wave import (
+        MechanisticWaveConfig,
+        MechanisticWaveOutputConfig,
+        MechanisticWaveRunResult,
+        ml_forecast_from_result,
+        run_mechanistic_wave_analysis,
+    )
     from ai4epi.analysis.preprocessing import (  # type: ignore[no-redef]
         FeatureEngineeringConfig,
         SupervisedDataset,
@@ -156,6 +165,14 @@ except ImportError:  # pragma: no cover - compatibility with current notebook-li
         merge_weekly_influenza_weather,
         normalize_weekly_frame,
         save_supervised_dataset,
+    )
+    from ai4epi.core.context import GlobalContext  # type: ignore[no-redef]
+    from ai4epi.core.io import TableWriteOptions, write_json, write_table  # type: ignore[no-redef]
+    from ai4epi.data.age_groups import age_group_labels, build_age_group_weekly
+    from ai4epi.data.influenza import (  # type: ignore[no-redef]
+        InfluenzaDbConfig,
+        load_influenza_weekly_from_api,
+        save_influenza_bundle,
     )
     from ai4epi.data.weather import (  # type: ignore[no-redef]
         WeatherApiConfig,
@@ -206,13 +223,16 @@ class AnalysisPipelineSettings(StrictModel):
     # Модель Барояна–Рвачёва (ai4epi.analysis.mechanistic_wave). По умолчанию
     # выключена: требует extra-зависимостей [mechanistic] и минуты счёта MCMC.
     run_mechanistic_wave: bool = False
+    # ML-прогноз по возрастным группам 0–14 / 15+ (ai4epi.analysis.age_group_forecast).
+    # Требует age_group_frame с оценками случаев по штаммам (таблица cases).
+    run_age_group_forecast: bool = False
     build_context: bool = True
     raise_on_error: bool = False
     save_source_artifacts: bool = True
     save_intermediate_tables: bool = True
 
     @model_validator(mode="after")
-    def validate_context_dependencies(self) -> "AnalysisPipelineSettings":
+    def validate_context_dependencies(self) -> AnalysisPipelineSettings:
         if self.build_context and not self.run_explainability:
             raise ValueError("build_context=True требует run_explainability=True.")
         if self.build_context and not self.run_epidemic_waves:
@@ -236,6 +256,7 @@ class AnalysisOutputConfig(StrictModel):
     epidemic_waves_subdir: str = Field(default="epidemic_waves", min_length=1)
     age_group_subdir: str = Field(default="age_group_season", min_length=1)
     mechanistic_wave_subdir: str = Field(default="mechanistic_wave", min_length=1)
+    age_group_forecast_subdir: str = Field(default="age_group_forecast", min_length=1)
     save_run_report: bool = True
     save_merged_weekly: bool = True
     csv_encoding: str = Field(default="utf-8-sig", min_length=1)
@@ -251,6 +272,7 @@ class AnalysisOutputConfig(StrictModel):
         "epidemic_waves_subdir",
         "age_group_subdir",
         "mechanistic_wave_subdir",
+        "age_group_forecast_subdir",
     )
     @classmethod
     def validate_relative_name(cls, value: str) -> str:
@@ -307,6 +329,9 @@ class AnalysisOutputConfig(StrictModel):
     def make_age_group_output(self) -> AgeGroupSeasonOutputConfig:
         return AgeGroupSeasonOutputConfig(output_dir=self.age_group_dir)
 
+    def make_age_group_forecast_output(self) -> AgeGroupForecastOutputConfig:
+        return AgeGroupForecastOutputConfig(output_dir=self.output_dir / self.age_group_forecast_subdir)
+
     def make_mechanistic_wave_output(self) -> MechanisticWaveOutputConfig:
         return MechanisticWaveOutputConfig(output_dir=self.mechanistic_wave_dir)
 
@@ -327,7 +352,7 @@ class AnalysisSourceConfig(StrictModel):
     weather_timezone: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
-    def validate_weather_coordinates(self) -> "AnalysisSourceConfig":
+    def validate_weather_coordinates(self) -> AnalysisSourceConfig:
         provided = [self.weather_latitude is not None, self.weather_longitude is not None, self.weather_timezone is not None]
         if any(provided) and not all(provided):
             raise ValueError("weather_latitude, weather_longitude и weather_timezone должны задаваться совместно.")
@@ -346,6 +371,7 @@ class AnalysisRunResult(StrictModel):
     epidemic_wave_result: EpidemicWaveRunResult | None = None
     age_group_result: AgeGroupSeasonRunResult | None = None
     mechanistic_wave_result: MechanisticWaveRunResult | None = None
+    age_group_forecast_result: AgeGroupForecastRunResult | None = None
     context_result: ContextBuildResult | None = None
     artifacts: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
@@ -394,6 +420,7 @@ class AnalysisRunResult(StrictModel):
             "mechanistic_wave_message": (
                 self.mechanistic_wave_result.message if self.mechanistic_wave_result is not None else None
             ),
+            "has_age_group_forecast": self.age_group_forecast_result is not None,
             "has_context": self.context_result is not None,
         }
         if self.context_result is not None:
@@ -425,6 +452,8 @@ def run_analysis_pipeline(
     epidemic_wave_config: EpidemicWaveConfig | None = None,
     age_group_config: AgeGroupSeasonConfig | None = None,
     mechanistic_wave_config: MechanisticWaveConfig | None = None,
+    age_group_forecast_config: AgeGroupForecastConfig | None = None,
+    data_quality_config: DataQualityConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
 ) -> AnalysisRunResult:
@@ -449,6 +478,7 @@ def run_analysis_pipeline(
     epidemic_wave_result: EpidemicWaveRunResult | None = None
     age_group_result: AgeGroupSeasonRunResult | None = None
     mechanistic_wave_result: MechanisticWaveRunResult | None = None
+    age_group_forecast_result: AgeGroupForecastRunResult | None = None
     context_result: ContextBuildResult | None = None
     error_message: str | None = None
     context_extra: dict[str, Any] = dict(extra_context_blocks or {})
@@ -516,13 +546,48 @@ def run_analysis_pipeline(
             else:
                 warnings.append("age_group_frame не передан; блок age_group_season не будет включён в GlobalContext.")
 
+        data_quality = build_data_quality_block(influenza_weekly, forecast_result, config=data_quality_config)
+        context_extra["data_quality"] = data_quality
+        if out is not None:
+            dq_path = write_json(data_quality, out.output_dir / "data_quality.json")
+            artifacts["data_quality"] = str(dq_path)
+        mw_cfg = mechanistic_wave_config or MechanisticWaveConfig()
+        age_weekly: dict[str, pd.DataFrame] | None = None
+        if cfg.run_age_group_forecast or (cfg.run_mechanistic_wave and mw_cfg.age_groups):
+            if age_group_frame is None:
+                warnings.append("age_group_frame не передан; возрастные этапы пропущены.")
+            else:
+                try:
+                    age_weekly = build_age_group_weekly(age_group_frame)
+                except Exception as exc:  # таблица без оценок по штаммам и т. п.
+                    warnings.append(f"Возрастные ряды не построены: {exc}")
+
+        if cfg.run_age_group_forecast and age_weekly is not None:
+            effective_weather = weather_weekly
+            if effective_weather is None and hourly_weather is not None:
+                effective_weather = aggregate_hourly_weather_to_weekly(hourly_weather, config=weather_aggregation_config)
+            age_group_forecast_result = run_age_group_forecast(
+                age_weekly,
+                labels=age_group_labels(),
+                weather_weekly=effective_weather,
+                feature_config=fcfg,
+                forecasting_config=forecasting_config,
+                config=age_group_forecast_config,
+                output=out.make_age_group_forecast_output() if out is not None else None,
+            )
+            artifacts.update(_prefix_artifacts("age_group_forecast", age_group_forecast_result.artifacts))
+            warnings.extend(f"age_group_forecast: {w}" for w in age_group_forecast_result.warnings)
+
         if cfg.run_mechanistic_wave:
             mechanistic_wave_result = run_mechanistic_wave_analysis(
                 influenza_weekly,
                 origin_date=forecast_result.origin_date,
                 ml_forecast=ml_forecast_from_result(forecast_result),
-                config=mechanistic_wave_config,
+                config=mw_cfg,
                 output=out.make_mechanistic_wave_output() if out is not None else None,
+                age_group_weekly=age_weekly,
+                age_group_labels=age_group_labels(),
+                age_ml_forecasts=age_group_forecast_result.ml_forecasts if age_group_forecast_result else None,
             )
             artifacts.update(_prefix_artifacts("mechanistic_wave", mechanistic_wave_result.artifacts))
             warnings.extend(f"mechanistic_wave: {w}" for w in mechanistic_wave_result.warnings)
@@ -530,6 +595,38 @@ def run_analysis_pipeline(
             # блок не добавляется, секция не активируется, вывод — только по ML.
             if mechanistic_wave_result.context_block is not None:
                 context_extra["mechanistic_wave"] = mechanistic_wave_result.context_block
+                agreement = mechanistic_wave_result.context_block["comparison_with_ml"].get("agreement_code")
+                if agreement == "disagree":
+                    add_reliability_reason(data_quality, "models_disagree", severity=1)
+
+        if age_group_forecast_result is not None:
+            age_block = age_group_forecast_result.context_block
+            mech_age = (
+                (mechanistic_wave_result.context_block or {}).get("age_groups")
+                if mechanistic_wave_result is not None
+                else None
+            )
+            by_code = {g["age_group_code"]: g for g in (mech_age or {}).get("groups", [])}
+            for group in age_block["groups"]:
+                mech = by_code.get(group["age_group_code"])
+                group["mechanistic"] = (
+                    {
+                        "phase_code": mech["phase_code"],
+                        "phase_label": mech["phase_label"],
+                        "peak": mech["peak"],
+                        "comparison_with_ml": mech["comparison_with_ml"],
+                    }
+                    if mech
+                    else None
+                )
+            context_extra["age_group_forecast"] = age_block
+
+        if data_quality["reliability_code"] != "ok":
+            warnings.append(
+                f"data_quality: надёжность прогноза {data_quality['reliability']}: " + "; ".join(data_quality["reasons"])
+            )
+        if out is not None:
+            write_json(data_quality, out.output_dir / "data_quality.json")
 
         if cfg.build_context:
             if shap_result is None:
@@ -563,6 +660,7 @@ def run_analysis_pipeline(
         epidemic_wave_result=epidemic_wave_result,
         age_group_result=age_group_result,
         mechanistic_wave_result=mechanistic_wave_result,
+        age_group_forecast_result=age_group_forecast_result,
         context_result=context_result,
         artifacts=artifacts,
         warnings=warnings,
@@ -591,6 +689,8 @@ def run_analysis_pipeline_from_sources(
     epidemic_wave_config: EpidemicWaveConfig | None = None,
     age_group_config: AgeGroupSeasonConfig | None = None,
     mechanistic_wave_config: MechanisticWaveConfig | None = None,
+    age_group_forecast_config: AgeGroupForecastConfig | None = None,
+    data_quality_config: DataQualityConfig | None = None,
     context_config: ContextBuildConfig | None = None,
     extra_context_blocks: Mapping[str, Any] | None = None,
     session: Any | None = None,
@@ -651,6 +751,8 @@ def run_analysis_pipeline_from_sources(
         epidemic_wave_config=epidemic_wave_config,
         age_group_config=age_group_config,
         mechanistic_wave_config=mechanistic_wave_config,
+        age_group_forecast_config=age_group_forecast_config,
+        data_quality_config=data_quality_config,
         context_config=context_config,
         extra_context_blocks=extra_context_blocks,
     )
@@ -774,15 +876,15 @@ def _infer_analysis_status(
 
 
 __all__ = [
+    "AnalysisOutputConfig",
     "AnalysisPipelineError",
     "AnalysisPipelineInputError",
     "AnalysisPipelineSettings",
-    "AnalysisOutputConfig",
-    "AnalysisSourceConfig",
     "AnalysisRunResult",
+    "AnalysisSourceConfig",
     "prepare_analysis_weekly_frame",
     "run_analysis_pipeline",
-    "run_analysis_pipeline_from_sources",
     "run_analysis_pipeline_from_source_params",
+    "run_analysis_pipeline_from_sources",
 ]
 

@@ -62,9 +62,52 @@ def test_weekly_requires_whole_weeks():
         sim.weekly_newly_infected()
 
 
-def test_age_model_shapes():
-    sim = get_model("age").simulate(ModelParams([0.5, 0.4], [0.3, 0.2, 0.1, 0.4], 100_000, [10.0, 10.0]), 70)
+def _age_params(alpha, beta, rho_g=(100_000.0, 400_000.0), i0=(60.0, 40.0)):
+    return ModelParams(list(alpha), list(beta), int(sum(rho_g)), list(i0), group_population_sizes=list(rho_g))
+
+
+def test_age_model_shapes_and_requires_group_sizes():
+    sim = get_model("age").simulate(_age_params([0.5, 0.4], [0.3, 0.2, 0.1, 0.4]), 70)
     assert sim.weekly_newly_infected().shape == (2, 10)
+    with pytest.raises(ValueError, match="group_population_sizes"):
+        get_model("age").simulate(ModelParams([0.5, 0.4], [0.3] * 4, 500_000, [10.0, 10.0]), 70)
+
+
+def test_age_model_reduces_to_total_model():
+    """Одинаковые alpha и все элементы матрицы контактов -> сумма групп = общая модель."""
+
+    age = get_model("age").simulate(_age_params([0.6, 0.6], [0.7] * 4), 210)
+    total = get_model("total").simulate(ModelParams([0.6], [0.7], 500_000, [100.0]), 210)
+    np.testing.assert_allclose(age.newly_infected.sum(axis=0), total.newly_infected[0], rtol=1e-6)
+
+
+def test_age_model_has_cross_group_transmission():
+    """Взрослые без собственной передачи (B[1,1]=0) заражаются только от детей."""
+
+    no_cross = get_model("age").simulate(_age_params([0.6, 0.6], [5.0, 0.0, 0.0, 0.0]), 140)
+    with_cross = get_model("age").simulate(_age_params([0.6, 0.6], [5.0, 0.0, 0.8, 0.0]), 140)
+    assert no_cross.newly_infected[1, 1:].sum() == 0.0
+    assert with_cross.newly_infected[1, 1:].sum() > 1000.0
+
+
+def test_age_model_respects_group_susceptibles():
+    sim = get_model("age").simulate(_age_params([0.3, 0.5], [3.0, 1.0, 1.0, 3.0]), 280)
+    infected_total = sim.newly_infected[:, 1:].sum(axis=1)
+    assert infected_total[0] <= 0.3 * 100_000 + 1e-6
+    assert infected_total[1] <= 0.5 * 400_000 + 1e-6
+
+
+def test_age_calibration_per_group_scale_recovers_fit():
+    model = get_model("age")
+    template = _age_params([0.0, 0.0], [0.0] * 4)
+    truth = template.with_values([0.4, 0.3], [2.0, 0.5, 0.8, 1.2])
+    observed = model_observable(model, truth, 16)
+    groups = observed.reshape(2, -1)
+    scale = [1.0 / groups[0].max(), 1.0 / groups[1].max()]
+    result = calibrate(model, observed, template, method="annealing", observation_scale=scale, beta_upper=5.0, random_seed=0)
+    fit = model_observable(model, result.best_params, 16).reshape(2, -1)
+    assert r2_score_np(groups[0], fit[0]) > 0.98
+    assert r2_score_np(groups[1], fit[1]) > 0.98
 
 
 def test_unknown_model_kind():
@@ -107,3 +150,87 @@ def test_unknown_calibration_method():
 
     with pytest.raises(CalibrationError):
         calibrate(get_model("total"), np.ones(5), ModelParams([0], [0], 1000, [1.0]), method="grid")  # type: ignore[arg-type]
+
+
+def test_age_model_with_external_contact_matrix():
+    from ai4epi.mechanistic import RSCF_CONTACT_MATRIX_2
+    from ai4epi.mechanistic.models import normalized_contact_matrix
+
+    matrix_model = get_model("age", contact_matrix=RSCF_CONTACT_MATRIX_2)
+    assert matrix_model.params_dims() == (2, 1)
+    m = normalized_contact_matrix(RSCF_CONTACT_MATRIX_2)
+    assert np.max(np.abs(np.linalg.eigvals(m))) == pytest.approx(1.0)
+    params = _age_params([0.4, 0.3], [1.5])
+    free = get_model("age")
+    expected = free.simulate(params.with_values([0.4, 0.3], (1.5 * m).reshape(-1)), 70).newly_infected
+    np.testing.assert_allclose(matrix_model.simulate(params, 70).newly_infected, expected)
+    with pytest.raises(ValueError):
+        get_model("age", contact_matrix=[[1.0, 2.0, 3.0]])
+
+
+def test_reproduction_number_total_and_age():
+    model = get_model("total")
+    params = ModelParams([0.5], [0.8], 100_000, [10.0])
+    sim = model.simulate(params, 140)
+    r = model.reproduction_number(params, sim)
+    g_sum = float(np.sum(DEFAULT_INFECTIVITY_PROFILE))
+    assert r[0] == pytest.approx(0.8 * int(0.5 * 100_000) / 100_000 * g_sum)
+    assert np.all(np.diff(r) <= 1e-12)  # запас восприимчивых только убывает
+    assert r[-1] < 1.0 < r[0]
+    age = get_model("age")
+    p = _age_params([0.5, 0.5], [0.8] * 4)
+    r_age = age.reproduction_number(p, age.simulate(p, 70))
+    assert r_age[0] > 1.0 and r_age.shape == (70,)
+
+
+def test_negative_binomial_noise_moments():
+    from ai4epi.mechanistic import negative_binomial_noise
+
+    rng = np.random.default_rng(0)
+    mean = np.full(20_000, 50.0)
+    x = negative_binomial_noise(mean, 400.0, rng)
+    assert x.mean() == pytest.approx(50.0, rel=0.05)
+    assert x.var() == pytest.approx(400.0, rel=0.1)
+    y = negative_binomial_noise(np.array([0.0, 10.0]), 1.0, rng)  # дисперсия < среднего -> Пуассон
+    assert y[0] == 0 and y[1] >= 0
+
+
+def test_bootstrap_calibration_returns_bundle():
+    model = get_model("total")
+    template = ModelParams([0.0], [0.0], 500_000, [100.0])
+    truth = template.with_values([0.55], [0.7])
+    clean = model_observable(model, truth, 18)
+    rng = np.random.default_rng(3)
+    observed = np.maximum(clean + rng.normal(0, 0.05 * clean.max(), clean.shape), 0)
+    result = calibrate(model, observed, template, method="bootstrap", observation_scale=1e4 / 5e6, n_samples=20, random_seed=1)
+    assert result.has_bundle and len(result.alpha_samples) == 20
+    assert r2_score_np(observed, model_observable(model, result.best_params, 18)) > 0.9
+    d = result.diagnostics
+    assert d["residual_variance"][0] > 0 and d["failed_refits"] == 0
+    assert d["parameter_sd"][0] > 0  # разброс параметров по репликам
+
+
+def test_fine_age_model_reduces_to_total_under_proportional_mixing():
+    from ai4epi.mechanistic import FineAgeContactBRModel
+
+    rho = np.array([30_000.0, 50_000.0, 120_000.0])
+    total = float(rho.sum())
+    proportional = np.tile(rho / total, (3, 1))  # M[k, m] ∝ rho_m: однородное перемешивание
+    model = FineAgeContactBRModel(rho, [0, 0, 1], contact_matrix=proportional)
+    assert model.params_dims() == (2, 1)
+    params = ModelParams([0.6, 0.6], [0.9], int(total), [0.4 * 100.0, 0.6 * 100.0])
+    fine = model.simulate(params, 140).newly_infected.sum(axis=0)
+    ref = get_model("total").simulate(ModelParams([0.6], [0.9], int(total), [100.0]), 140).newly_infected[0]
+    np.testing.assert_allclose(fine, ref, rtol=1e-3, atol=1.0)
+    r = model.reproduction_number(params, model.simulate(params, 140))
+    assert r[0] == pytest.approx(0.9 * 0.6 * float(np.sum(DEFAULT_INFECTIVITY_PROFILE)), rel=1e-3)
+
+
+def test_fine_age_populations_and_authors_matrix():
+    from ai4epi.mechanistic import AJELLI_LITVINOVA_ALL_CONTACTS
+    from ai4epi.mechanistic.models import fine_age_populations
+
+    pops = fine_age_populations(300.0, 400.0, 800.0, 5000.0, 1000.0)
+    assert len(pops) == 12 == len(AJELLI_LITVINOVA_ALL_CONTACTS)
+    assert pops.sum() == pytest.approx(300 + 400 + 800 + 5000 + 1000)
+    assert pops[:3].sum() == pytest.approx(300 + 400 + 800)

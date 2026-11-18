@@ -16,19 +16,20 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 try:  # Пакетный импорт.
     from ai4epi.generation.bulletin import Bulletin, load_bulletin
-    from ai4epi.output.rendering import RenderSettings, RenderedBulletin, render_bulletin
+    from ai4epi.output.rendering import RenderedBulletin, RenderSettings, render_bulletin
 except ImportError:  # pragma: no cover - поддержка запуска как набора отдельных файлов.
     from ai4epi.generation.bulletin import Bulletin, load_bulletin  # type: ignore[no-redef]
-    from ai4epi.output.rendering import RenderSettings, RenderedBulletin, render_bulletin  # type: ignore[no-redef]
+    from ai4epi.output.rendering import RenderedBulletin, RenderSettings, render_bulletin  # type: ignore[no-redef]
 
 
 JsonObject = dict[str, Any]
@@ -77,7 +78,7 @@ class PdfFontConfig(StrictModel):
     require_unicode_font: bool = True
 
     @model_validator(mode="after")
-    def validate_font_pair(self) -> "PdfFontConfig":
+    def validate_font_pair(self) -> PdfFontConfig:
         if (self.regular_path is None) != (self.bold_path is None):
             raise ValueError("regular_path и bold_path должны задаваться совместно.")
         return self
@@ -133,7 +134,7 @@ class PdfRenderResult(StrictModel):
     pdf_path: Path
     manifest_path: Path | None = None
     page_count: int | None = Field(default=None, ge=1)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     font_family: str = Field(min_length=1)
     font_regular_path: Path | None = None
     font_bold_path: Path | None = None

@@ -23,8 +23,9 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 try:  # Пакетный импорт.
     from ai4epi.analysis.analysis_pipeline import (
@@ -34,17 +35,17 @@ try:  # Пакетный импорт.
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
     from ai4epi.core.config import (
         default_config,
         load_ai4epi_config,
         run_pipeline_from_config,
         save_ai4epi_config,
     )
-    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, save_eval_report
+    from ai4epi.core.io import TableReadOptions, read_table
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza
     from ai4epi.generation.narrator import make_chat_backend
-    from ai4epi.core.io import TableReadOptions, read_table, write_json
-    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file
-    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file
     from ai4epi.orchestration.workflow import (
         FullWorkflowOutputConfig,
         FullWorkflowSettings,
@@ -52,9 +53,9 @@ try:  # Пакетный импорт.
         run_full_workflow_from_sources,
         run_full_workflow_from_tables,
     )
-    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig
-    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig
-    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza
+    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file
+    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file
+    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, save_eval_report
 except ImportError:  # pragma: no cover - поддержка запуска из плоского исследовательского каталога.
     from ai4epi.analysis.analysis_pipeline import (  # type: ignore[no-redef]
         AnalysisOutputConfig,
@@ -63,18 +64,17 @@ except ImportError:  # pragma: no cover - поддержка запуска из
         run_analysis_pipeline,
         run_analysis_pipeline_from_sources,
     )
+    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig  # type: ignore[no-redef]
+    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig  # type: ignore[no-redef]
     from ai4epi.core.config import (  # type: ignore[no-redef]
         default_config,
         load_ai4epi_config,
         run_pipeline_from_config,
         save_ai4epi_config,
     )
-    from ai4epi.quality.evaluation import EvalConfig, evaluate_bulletin_from_files, print_eval_report, \
-        save_eval_report  # type: ignore[no-redef]
-    from ai4epi.core.io import TableReadOptions, read_table, write_json  # type: ignore[no-redef]
+    from ai4epi.core.io import TableReadOptions, read_table  # type: ignore[no-redef]
+    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza  # type: ignore[no-redef]
     from ai4epi.generation.narrator import make_chat_backend  # type: ignore[no-redef]
-    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file  # type: ignore[no-redef]
-    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file  # type: ignore[no-redef]
     from ai4epi.orchestration.workflow import (  # type: ignore[no-redef]
         FullWorkflowOutputConfig,
         FullWorkflowSettings,
@@ -82,9 +82,14 @@ except ImportError:  # pragma: no cover - поддержка запуска из
         run_full_workflow_from_sources,
         run_full_workflow_from_tables,
     )
-    from ai4epi.analysis.mechanistic_wave import MechanisticWaveConfig  # type: ignore[no-redef]
-    from ai4epi.analysis.preprocessing import FeatureEngineeringConfig  # type: ignore[no-redef]
-    from ai4epi.data.local_excel import DEFAULT_LOCAL_DATA_DIR, load_local_influenza  # type: ignore[no-redef]
+    from ai4epi.output.pdf import PdfFontConfig, PdfOutputConfig, PdfSettings, render_bulletin_pdf_file  # type: ignore[no-redef]
+    from ai4epi.output.rendering import RenderOutputConfig, make_default_render_settings, render_bulletin_file  # type: ignore[no-redef]
+    from ai4epi.quality.evaluation import (
+        EvalConfig,
+        evaluate_bulletin_from_files,
+        print_eval_report,
+        save_eval_report,  # type: ignore[no-redef]
+    )
 
 
 JsonObject = dict[str, Any]
@@ -138,6 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_analysis_local_command(subparsers)
     _add_run_all_command(subparsers)
     _add_run_all_local_command(subparsers)
+    _add_backtest_local_command(subparsers)
+    _add_br_conformal_fit_command(subparsers)
     _add_generate_bulletin_command(subparsers)
     _add_evaluate_bulletin_command(subparsers)
     _add_render_command(subparsers)
@@ -252,9 +259,10 @@ def _add_run_all_command(subparsers: argparse._SubParsersAction[argparse.Argumen
 
 
 def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("модель Барояна–Рвачёва")
+    group = parser.add_argument_group("модель Барояна–Рвачёва и возрастные группы")
     group.add_argument("--mechanistic-wave", action="store_true", help="Включить этап модели Барояна–Рвачёва (фаза волны, пик, сопоставление с ML).")
-    group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
+    group.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"), default="mcmc", help="Метод калибровки. По умолчанию: %(default)s.")
+    group.add_argument("--br-kernel", choices=("br", "seir"), default="br", help="Профиль заразности: Барояна–Рвачёва или SEIR (Кермак–Маккендрик).")
     group.add_argument("--br-epsilon", type=float, default=1.0, help="Масштаб ABC-ядра (в случаях на 10 тыс.). По умолчанию: %(default)s.")
     group.add_argument("--br-calibration-start", choices=("wave_onset", "season_start"), default="wave_onset", help="Начало калибровки: от начала роста или с недели --br-season-start-week.")
     group.add_argument("--br-calibration-start-date", default=None, help="Явная дата начала калибровки (YYYY-MM-DD).")
@@ -263,6 +271,10 @@ def _add_mechanistic_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--br-draws", type=int, default=500, help="MCMC/SMC: число сохраняемых итераций.")
     group.add_argument("--br-chains", type=int, default=4, help="MCMC/SMC: число цепей.")
     group.add_argument("--br-seed", type=int, default=42, help="Random seed калибровки.")
+    group.add_argument("--br-age-groups", action="store_true", help="Дополнительно калибровать возрастную модель БР (0–14 / 15+).")
+    group.add_argument("--br-age-contacts", choices=("matrix", "free", "fine_5y", "authors_3g"), default="fine_5y", help="Возрастная модель: матрица 2×2 RSCF; 4 свободных коэффициента; сила инфекции по 5-летним группам или по матрице 0–6/7–14/15+ авторов (Ajelli & Litvinova).")
+    group.add_argument("--br-bootstrap-replicates", type=int, default=100, help="Число бутстреп-реплик (--br-method bootstrap).")
+    group.add_argument("--age-forecast", action="store_true", help="ML-прогноз по возрастным группам 0–14 / 15+ (отдельная HGB-модель на группу).")
 
 
 def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
@@ -276,11 +288,15 @@ def _mechanistic_config(args: argparse.Namespace) -> MechanisticWaveConfig:
         draws=args.br_draws,
         chains=args.br_chains,
         random_seed=args.br_seed,
+        age_groups=bool(args.br_age_groups),
+        age_contact_structure=getattr(args, "br_age_contacts", "fine_5y"),
+        bootstrap_replicates=getattr(args, "br_bootstrap_replicates", 100),
+        model_kernel=getattr(args, "br_kernel", "br"),
     )
 
 
 def _add_local_source_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--city", required=True, help="Каталог города в --data-dir: spb, samara, chelyabinsk.")
+    parser.add_argument("--city", required=True, help="Каталог города в --data-dir: spb, samara, chelyabinsk, moscow, novosibirsk, omsk, voronezh, krasnodar.")
     parser.add_argument("--data-dir", default=DEFAULT_LOCAL_DATA_DIR, type=Path, help="Каталог с <city>/cases.xlsx и pcr.xlsx. По умолчанию: %(default)s.")
     parser.add_argument("--start-date", default=None, help="Первая неделя ряда (YYYY-MM-DD).")
     parser.add_argument("--end-date", default=None, help="Последняя неделя ряда (YYYY-MM-DD): состояние системы на эту неделю.")
@@ -327,6 +343,115 @@ def _add_run_all_local_command(subparsers: argparse._SubParsersAction[argparse.A
     parser.add_argument("--fail-on-evaluation-errors", action="store_true", help="Считать ошибки evaluation фатальными.")
     _add_mechanistic_args(parser)
     parser.set_defaults(handler=_cmd_run_all_local)
+
+
+
+def _add_br_conformal_fit_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "br-conformal-fit",
+        help="Таблица конформной полосы модели БР по predictions.csv бэктестов (backtest-local).",
+    )
+    parser.add_argument("predictions", nargs="+", type=Path, help="Файлы predictions.csv или каталоги бэктестов.")
+    parser.add_argument("--output", default=None, type=Path, help="JSON-таблица. По умолчанию: data/calibration/br_conformal.json.")
+    parser.add_argument("--level", type=float, default=0.9, help="Номинальное покрытие. По умолчанию: %(default)s.")
+    parser.add_argument("--min-points", type=int, default=15, help="Минимум точек на горизонт в группе фаз.")
+    parser.add_argument("--evaluate", action="store_true", help="Дополнительно: покрытие при исключении каждого бэктеста.")
+    parser.set_defaults(handler=_cmd_br_conformal_fit)
+
+
+def _cmd_br_conformal_fit(args: argparse.Namespace) -> int:
+    import pandas
+
+    from ai4epi.analysis.br_conformal import DEFAULT_BR_CONFORMAL_PATH, evaluate_leave_one_out, fit_br_conformal
+
+    frames = []
+    for path in args.predictions:
+        file = path / "predictions.csv" if path.is_dir() else path
+        frame = pandas.read_csv(file)
+        frame["source"] = str(file)
+        frames.append(frame)
+    predictions = pandas.concat(frames, ignore_index=True)
+    table = fit_br_conformal(
+        predictions, level=args.level, min_points=args.min_points, sources=[str(p) for p in args.predictions]
+    )
+    report: dict[str, Any] = {"table": table}
+    if args.evaluate and len(frames) > 1:
+        loo = evaluate_leave_one_out(predictions, group_col="source", level=args.level, min_points=args.min_points)
+        report["leave_one_out"] = {
+            "coverage": round(float(loo["inside"].mean()), 3),
+            "mean_width": round(float(loo["width"].mean()), 3),
+            "coverage_by_source": {k: round(float(v), 3) for k, v in loo.groupby("source")["inside"].mean().items()},
+            "coverage_by_phase": {k: round(float(v), 3) for k, v in loo.groupby("phase")["inside"].mean().items()},
+            "coverage_by_horizon": {int(k): round(float(v), 3) for k, v in loo.groupby("horizon")["inside"].mean().items()},
+        }
+        table["leave_one_out"] = report["leave_one_out"]
+    output = args.output or DEFAULT_BR_CONFORMAL_PATH
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(table, ensure_ascii=False, indent=2), encoding="utf-8")
+    report["output"] = str(output)
+    _print_json(report)
+    return EXIT_OK
+
+
+def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    parser = subparsers.add_parser(
+        "backtest-local",
+        help="Скользящий бэктест по локальным xlsx: еженедельное переобучение ML, модель БР, согласие моделей.",
+    )
+    parser.add_argument("--city", required=True, help="Каталог города в --data-dir: spb, samara, chelyabinsk, moscow, novosibirsk, omsk, voronezh, krasnodar.")
+    parser.add_argument("--data-dir", default=DEFAULT_LOCAL_DATA_DIR, type=Path, help="Каталог с <city>/cases.xlsx и pcr.xlsx.")
+    parser.add_argument("--start", required=True, help="Первая неделя проверки (YYYY-MM-DD).")
+    parser.add_argument("--end", required=True, help="Последняя неделя проверки (YYYY-MM-DD).")
+    parser.add_argument("--output-dir", default="runs/backtest", type=Path, help="Каталог: predictions.csv, metrics.json, report.md.")
+    parser.add_argument("--no-mechanistic", action="store_true", help="Не калибровать модель Барояна–Рвачёва на каждой неделе.")
+    parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"), default="mcmc", help="Метод калибровки модели БР.")
+    parser.add_argument("--br-kernel", choices=("br", "seir"), default="br", help="Профиль заразности: Барояна–Рвачёва или SEIR.")
+    parser.add_argument("--weather-weekly", default=None, type=Path, help="Недельная погода (scripts/convert_weather_export.py): модель строится с температурными признаками.")
+    parser.add_argument(
+        "--ari",
+        choices=("off", "own", "history"),
+        default="off",
+        help="Признаки ОРВИ: own — по cases.xlsx; history — норма ещё и по ari_history.csv (scripts/convert_ari_history.py).",
+    )
+    parser.add_argument("--legacy-variant", action="store_true", help="Дополнительно оценить исходный HGB (learning_rate 0.001, 8000 итераций).")
+    parser.add_argument("--warmup-weeks", type=int, default=52, help="Недели разогрева для конформных интервалов (не входят в метрики).")
+    parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР.")
+    parser.add_argument("--n-jobs", type=int, default=None, help="Число процессов (по умолчанию — все ядра).")
+    parser.set_defaults(handler=_cmd_backtest_local)
+
+
+def _cmd_backtest_local(args: argparse.Namespace) -> int:
+    from ai4epi.analysis.backtest import BacktestConfig, LocalDataAt, run_backtest
+    from ai4epi.analysis.forecasting import HistGradientBoostingPointConfig, legacy_point_config
+
+    variants = {"hgb": HistGradientBoostingPointConfig()}
+    if args.legacy_variant:
+        variants["hgb_legacy"] = legacy_point_config()
+    kwargs: dict[str, Any] = {}
+    if args.n_jobs:
+        kwargs["n_jobs"] = args.n_jobs
+    cfg = BacktestConfig(
+        start=args.start,
+        end=args.end,
+        model_variants=variants,
+        run_mechanistic=not args.no_mechanistic,
+        mechanistic=MechanisticWaveConfig(method=args.br_method, model_kernel=args.br_kernel, cores=1),
+        interval_warmup_weeks=args.warmup_weeks,
+        **kwargs,
+    )
+    truth = load_local_influenza(args.city, data_dir=args.data_dir, pcr_gap_policy=args.pcr_gap_policy).weekly
+    result = run_backtest(
+        LocalDataAt(args.city, args.data_dir, args.pcr_gap_policy, weather_weekly=args.weather_weekly, ari=args.ari),
+        truth,
+        config=cfg,
+        feature_config=FeatureEngineeringConfig(
+            temp_cols=("temp_mean",) if args.weather_weekly else (), ari_features=args.ari != "off"
+        ),
+        output_dir=args.output_dir,
+        label=f"{args.city}, {args.start} – {args.end}",
+    )
+    _print_json({"artifacts": {k: str(v) for k, v in result.artifacts.items()}, "overall": result.metrics["overall_common_points"]})
+    return EXIT_OK
 
 
 def _add_generate_bulletin_command(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -435,6 +560,7 @@ def _cmd_run_analysis_source(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     source = AnalysisSourceConfig(
         city=args.city,
@@ -472,6 +598,7 @@ def _cmd_run_analysis_tables(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     no_weather = weather_weekly is None and hourly_weather is None and bool(args.no_weather_required)
     result = run_analysis_pipeline(
@@ -515,6 +642,7 @@ def _cmd_run_all(args: argparse.Namespace) -> int:
     analysis_settings = AnalysisPipelineSettings(
         require_weather=not bool(args.no_weather),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     extra: dict[str, Any] = {"mechanistic_wave_config": _mechanistic_config(args)}
     if args.no_weather:
@@ -559,6 +687,7 @@ def _cmd_run_analysis_local(args: argparse.Namespace) -> int:
         build_context=not bool(args.no_context),
         raise_on_error=bool(args.raise_on_error),
         run_mechanistic_wave=bool(args.mechanistic_wave),
+        run_age_group_forecast=bool(args.age_forecast),
     )
     result = run_analysis_pipeline(
         influenza_weekly=influenza_weekly,
@@ -603,6 +732,7 @@ def _cmd_run_all_local(args: argparse.Namespace) -> int:
         analysis_settings=AnalysisPipelineSettings(
             require_weather=weather_weekly is not None,
             run_mechanistic_wave=bool(args.mechanistic_wave),
+            run_age_group_forecast=bool(args.age_forecast),
         ),
         extra_analysis_kwargs=extra,
     )

@@ -12,7 +12,9 @@ The plotting code intentionally follows the reference notebook output:
 3. age-group season overlay plot;
 4. age-group panel plot with raw/smoothed curves and width markers;
 5. mechanistic (Baroyan–Rvachev) wave plot with the ML forecast overlay, when
-   the ``mechanistic_wave`` block is present.
+   the ``mechanistic_wave`` block is present;
+6. age-group ML forecast plot (0–14 / 15+) with the age-structured
+   Baroyan–Rvachev trajectories, when the ``age_group_forecast`` block is present.
 
 The renderer/PDF layer decides where these assets are placed in the final
 bulletin. This module is responsible only for making the images themselves.
@@ -21,8 +23,9 @@ bulletin. This module is responsible only for making the images themselves.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -163,14 +166,91 @@ def build_publication_figure_assets(
             description=(
                 "Наблюдаемая заболеваемость гриппом на 10 тыс. населения, центральная траектория модели "
                 "Барояна–Рвачёва и 5–95% диапазон пучка траекторий; точки с интервалами — прогноз модели "
-                "машинного обучения на четыре недели."
+                "машинного обучения на четыре недели. Нижняя панель — эффективное репродуктивное число R_t "
+                "по модели (пунктир — уровень 1)."
             ),
             section_id="mechanistic_wave",
             order=45,
             placement="before_section",
         )
 
+    age_plot_path = out / "age_group_forecast_plot.png"
+    if ctx.get("age_group_forecast") and _plot_age_group_forecast(ctx, artifacts, age_plot_path, dpi=dpi):
+        assets["age_group_forecast_plot"] = _image_asset(
+            name="age_group_forecast_plot",
+            path=age_plot_path,
+            title="Рис. 6. Прогноз расчётной заболеваемости гриппом по возрастным группам.",
+            description=(
+                "Наблюдаемые значения и прогноз модели машинного обучения с прогнозными интервалами на четыре "
+                "недели для групп 0–14 и 15+ лет (на 10 тыс. населения группы); линия — возрастная модель "
+                "Барояна–Рвачёва, если она рассчитывалась."
+            ),
+            section_id="age_group_forecast",
+            order=47,
+            placement="before_section",
+        )
+
     return assets
+
+
+def _plot_age_group_forecast(
+    ctx: Mapping[str, Any],
+    artifacts: Mapping[str, str],
+    path: Path,
+    *,
+    dpi: int,
+    window_back: int = 20,
+    tick_step: int = 2,
+) -> bool:
+    block = ctx.get("age_group_forecast") or {}
+    groups = list(block.get("groups") or [])
+    if not groups:
+        return False
+    mech_path = _artifact_path(artifacts, "mechanistic_wave.age_trajectories_csv")
+    mech = pd.read_csv(mech_path, parse_dates=["datetime"]) if mech_path else None
+
+    plt = _prepare_matplotlib()
+    fig, axes = plt.subplots(len(groups), 1, figsize=(14, 3.6 * len(groups)), squeeze=False)
+    for ax, group in zip(axes[:, 0], groups, strict=True):
+        code = group.get("age_group_code")
+        hist_path = _artifact_path(artifacts, f"age_group_forecast.{code}.history_plus_forecast")
+        if hist_path is None:
+            plt.close(fig)
+            return False
+        table = pd.read_csv(hist_path, parse_dates=["date"])
+        hist = table[table.get("row_type", pd.Series("history", index=table.index)).astype(str).eq("history")]
+        hist = hist.dropna(subset=["value"]).sort_values("date").tail(window_back)
+        horizons = list(group.get("horizons") or [])
+        fut_dates = [pd.Timestamp(h["target_date"]) for h in horizons]
+        all_dates = list(pd.to_datetime(hist["date"])) + fut_dates
+        index = {d: i for i, d in enumerate(all_dates)}
+        x_hist = np.arange(len(hist))
+        ax.plot(x_hist, hist["value"].to_numpy(float), color=DATA_COLOR, marker="o", linewidth=2, markersize=4, label="Наблюдения")
+        if horizons:
+            xf = np.array([index[d] for d in fut_dates])
+            yf = np.array([float(h["point_forecast"]) for h in horizons])
+            lo = np.array([float(h["q_lo"]) for h in horizons])
+            hi = np.array([float(h["q_hi"]) for h in horizons])
+            ax.fill_between(xf, lo, hi, color=FORECAST_COLOR, alpha=PI_ALPHA, label="Модель МО: прогнозный интервал")
+            ax.plot(xf, yf, color=FORECAST_COLOR, marker="s", linestyle="--", label="Модель МО: прогноз")
+        if mech is not None:
+            mg = mech[mech["age_group_code"] == code]
+            pts = [(index[d], v) for d, v in zip(mg["datetime"], mg["best"], strict=True) if d in index]
+            if pts:
+                xs, ys = zip(*sorted(pts), strict=True)
+                ax.plot(xs, ys, color="#9467bd", linewidth=2, label="Модель БР (возрастная)")
+        ax.axvline(len(hist) - 1, color="grey", linestyle=":", linewidth=1)
+        labels = _iso_week_labels(pd.DatetimeIndex(all_dates))
+        ticks = np.arange(len(all_dates))
+        ax.set_xticks(ticks[::tick_step])
+        ax.set_xticklabels(labels[::tick_step])
+        ax.set_title(str(group.get("age_group_label", code)), fontsize=11)
+        ax.set_ylabel("на 10 тыс. группы")
+        ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+        ax.legend(fontsize=9, loc="upper left")
+    axes[-1, 0].set_xlabel("ISO-неделя")
+    _save_figure(fig, path, dpi=dpi)
+    return True
 
 
 def _plot_mechanistic_wave(
@@ -196,9 +276,18 @@ def _plot_mechanistic_wave(
     block = ctx.get("mechanistic_wave") or {}
 
     plt = _prepare_matplotlib()
-    fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
+    has_rt = "r_t" in table.columns and table["r_t"].notna().any()
+    if has_rt:
+        fig, (ax, ax_rt) = plt.subplots(2, 1, figsize=(14, 6.0), sharex=True, gridspec_kw={"height_ratios": [3, 1.2]})
+    else:
+        fig, ax = plt.subplots(1, 1, figsize=(14, 4.2))
+    band_label = {
+        "conformal": "Модель БР: 90% по ошибкам прошлых прогнозов",
+        "predictive": "Модель БР: 5–95% (бутстреп, с шумом наблюдений)",
+        "parameter": "Модель БР: 5–95% (бутстреп параметров)",
+    }.get(str(block.get("band_type")), "Модель БР: 5–95% пучка")
     if {"q05", "q95"}.issubset(table.columns):
-        ax.fill_between(x, table["q05"], table["q95"], color="#9467bd", alpha=PI_ALPHA, label="Модель БР: 5–95% пучка")
+        ax.fill_between(x, table["q05"], table["q95"], color="#9467bd", alpha=PI_ALPHA, label=band_label)
     ax.plot(x, table["best"], color="#9467bd", linewidth=2, label="Модель БР: центральная траектория")
     ax.plot(x[:n_obs], table["observed"].iloc[:n_obs], color=DATA_COLOR, marker="o", linewidth=0, markersize=5, label="Наблюдения")
 
@@ -231,9 +320,19 @@ def _plot_mechanistic_wave(
                 (px, float(table["best"].iloc[px])),
                 textcoords="offset points", xytext=(0, 8), ha="center", fontsize=9, color="#9467bd",
             )
-    ax.set_xticks(x[::tick_step])
-    ax.set_xticklabels(labels[::tick_step])
-    ax.set_xlabel("ISO-неделя")
+    bottom = ax
+    if has_rt:
+        bottom = ax_rt
+        if {"r_t_q05", "r_t_q95"}.issubset(table.columns):
+            ax_rt.fill_between(x, table["r_t_q05"], table["r_t_q95"], color="#9467bd", alpha=PI_ALPHA)
+        ax_rt.plot(x, table["r_t"], color="#9467bd", linewidth=1.8)
+        ax_rt.axhline(1.0, color="grey", linestyle="--", linewidth=1)
+        ax_rt.axvline(n_obs - 1, color="grey", linestyle=":", linewidth=1)
+        ax_rt.set_ylabel("R_t модели")
+        ax_rt.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+    bottom.set_xticks(x[::tick_step])
+    bottom.set_xticklabels(labels[::tick_step])
+    bottom.set_xlabel("ISO-неделя")
     ax.set_ylabel("на 10 тыс. населения")
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
     ax.legend(fontsize=9, loc="upper left")
@@ -345,7 +444,6 @@ def _plot_forecast_like_notebook(
 
     y_hat = forecast_rows["value"].to_numpy(dtype=float)
     future_dates = pd.DatetimeIndex(forecast_rows["date"])
-    origin_date = pd.Timestamp(history["date"].max())
 
     y_lo: np.ndarray | None = None
     y_hi: np.ndarray | None = None
@@ -504,7 +602,7 @@ def _plot_epidemic_wave_comparison_like_notebook(
                         color=color,
                         ha="center",
                         va="bottom",
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7),
+                        bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": color, "alpha": 0.7},
                     )
             else:
                 fwhm_lb = wave.get("fwhm_lower_bound_weeks")
@@ -517,7 +615,7 @@ def _plot_epidemic_wave_comparison_like_notebook(
                         color=color,
                         ha="right",
                         va="bottom",
-                        bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=color, alpha=0.7),
+                        bbox={"boxstyle": "round,pad=0.15", "fc": "white", "ec": color, "alpha": 0.7},
                     )
 
     if not plotted:
@@ -617,7 +715,7 @@ def _plot_age_group_season_panels_like_notebook(
     flat_axes = axes.flatten()
 
     plotted_any = False
-    for ax, code in zip(flat_axes, codes):
+    for ax, code in zip(flat_axes, codes, strict=False):
         row = row_by_code.get(code)
         group = points[points["age_group_code"].astype(str).eq(code)].copy()
         if row is None or group.empty:

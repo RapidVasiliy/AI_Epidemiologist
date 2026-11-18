@@ -1,0 +1,118 @@
+{
+  "level": 0.9,
+  "offset": 1.0,
+  "phases": [
+    "growth",
+    "peak",
+    "decline"
+  ],
+  "quantiles": {
+    "growth": {
+      "1": 1.7766,
+      "2": 3.2575,
+      "3": 4.5196,
+      "4": 5.2059
+    },
+    "other": {
+      "1": 1.4982,
+      "2": 1.246,
+      "3": 1.225,
+      "4": 1.2231
+    },
+    "all": {
+      "1": 1.5685,
+      "2": 1.8334,
+      "3": 2.3083,
+      "4": 2.4011
+    }
+  },
+  "counts": {
+    "growth": {
+      "1": 75,
+      "2": 75,
+      "3": 75,
+      "4": 75
+    },
+    "other": {
+      "1": 219,
+      "2": 219,
+      "3": 219,
+      "4": 219
+    },
+    "all": {
+      "1": 294,
+      "2": 294,
+      "3": 294,
+      "4": 294
+    }
+  },
+  "n_points": 1176,
+  "sources": [
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/chelyabinsk_2017",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/chelyabinsk_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/chelyabinsk_2022",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/krasnodar_2016",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/krasnodar_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2016",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2019",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/novosibirsk_2017",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/novosibirsk_2019",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/omsk_2017",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/omsk_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2016",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2023",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2014",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2015",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2016",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2017",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2019",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2022",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2023",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/voronezh_2018",
+    "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/voronezh_2019"
+  ],
+  "definition": "q — квантиль |y − br| / (y0 + offset), y0 — значение текущей недели; полоса br ± q·(y0 + offset)",
+  "leave_one_out": {
+    "coverage": 0.901,
+    "mean_width": 53.377,
+    "coverage_by_source": {
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/chelyabinsk_2018/predictions.csv": 0.938,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/chelyabinsk_2022/predictions.csv": 0.9,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/krasnodar_2016/predictions.csv": 0.852,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/krasnodar_2018/predictions.csv": 0.827,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2016/predictions.csv": 0.889,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2018/predictions.csv": 0.904,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/moscow_2019/predictions.csv": 0.85,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/novosibirsk_2019/predictions.csv": 0.857,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/omsk_2017/predictions.csv": 0.917,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/omsk_2018/predictions.csv": 1.0,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2016/predictions.csv": 0.975,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2018/predictions.csv": 0.567,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/samara_2023/predictions.csv": 0.971,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2014/predictions.csv": 1.0,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2015/predictions.csv": 0.9,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2016/predictions.csv": 0.917,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2017/predictions.csv": 0.93,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2018/predictions.csv": 0.933,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2019/predictions.csv": 1.0,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2022/predictions.csv": 0.925,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/spb_2023/predictions.csv": 0.972,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/voronezh_2018/predictions.csv": 1.0,
+      "/tmp/claude-0/-home-user/4f06e2ce-f8b8-5274-beb2-32b879306b77/scratchpad/kern/out_seir_mcmc/voronezh_2019/predictions.csv": 0.911
+    },
+    "coverage_by_phase": {
+      "decline": 0.906,
+      "growth": 0.897,
+      "peak": 0.892
+    },
+    "coverage_by_horizon": {
+      "1": 0.901,
+      "2": 0.898,
+      "3": 0.898,
+      "4": 0.905
+    }
+  }
+}

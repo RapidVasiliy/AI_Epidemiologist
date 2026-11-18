@@ -46,7 +46,9 @@ dependencies = [
   "reportlab>=4.0",
   "PyYAML>=6.0",
   "openpyxl>=3.1",
-  "pyarrow>=14.0"
+  "pyarrow>=14.0",
+  "statsmodels>=0.14",
+  "xlrd>=2.0"
 ]
 
 [project.optional-dependencies]
@@ -66,6 +68,10 @@ mechanistic = [
   "pymc>=5.18,<6",
   "arviz>=0.20,<0.23",
   "optuna>=4.0",
+  "scipy>=1.11"
+]
+research = [
+  "numba>=0.59",
   "scipy>=1.11"
 ]
 notebook = [
@@ -94,6 +100,8 @@ include = ["ai4epi*"]
 target-version = "py311"
 line-length = 120
 src = ["src", "tests"]
+# дословные копии исходного кода моделей (эталоны для проверки портов)
+extend-exclude = ["research/multistrain_calibration/legacy_v4b", "research/multistrain_calibration/reference_v2", "research/contact_matrix_uncertainty", "research/kernel_comparison"]
 
 [tool.ruff.lint]
 select = [
@@ -112,7 +120,15 @@ ignore = [
   "E501",
   "RUF001",
   "RUF002",
-  "RUF003"
+  "RUF003",
+  # аргументы, которых требует общий интерфейс (оценщики, функции рисунков)
+  "ARG001",
+  "ARG002",
+  "ARG004",
+  # классовые константы-схемы оценщиков не изменяются
+  "RUF012",
+  # str+Enum сохраняет поведение str(); StrEnum его меняет
+  "UP042"
 ]
 
 [tool.ruff.lint.isort]
@@ -129,6 +145,7 @@ markers = [
 ]
 filterwarnings = [
   "error",
+  "ignore:PyTensor could not link to a BLAS:UserWarning",
   "ignore::DeprecationWarning:shap.*",
   "ignore::DeprecationWarning:numba.*",
   "ignore::RuntimeWarning:pymc.*",

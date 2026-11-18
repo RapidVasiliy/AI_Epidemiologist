@@ -9,11 +9,12 @@ PDF. Его задача — дать устойчивое промежуточ�
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from html import escape as html_escape
-import json
 from pathlib import Path
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -91,7 +92,7 @@ class RenderAsset(StrictModel):
     metadata: JsonObject = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_asset_payload(self) -> "RenderAsset":
+    def validate_asset_payload(self) -> RenderAsset:
         if self.kind == "html" and not self.html:
             raise ValueError("HTML asset requires the html field.")
         if self.kind != "html" and self.path is None:
@@ -182,7 +183,7 @@ class RenderOutputConfig(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_any_output(self) -> "RenderOutputConfig":
+    def validate_any_output(self) -> RenderOutputConfig:
         if not (self.save_markdown or self.save_html or self.save_manifest):
             raise ValueError("Должен быть включён хотя бы один output-артефакт.")
         return self
@@ -296,6 +297,7 @@ def make_default_render_settings(*, include_assets: bool = True) -> RenderSettin
             SectionRenderSpec(section_id="age_group_season_overview", mode="paragraphs"),
             SectionRenderSpec(section_id="forecast_risks", mode="paragraphs"),
             SectionRenderSpec(section_id="mechanistic_wave", mode="paragraphs"),
+            SectionRenderSpec(section_id="age_group_forecast", mode="paragraphs"),
             SectionRenderSpec(section_id="shap_interpretation", mode="paragraphs"),
             SectionRenderSpec(section_id="model_quality", mode="paragraphs"),
             SectionRenderSpec(section_id="model_description", mode="paragraphs"),

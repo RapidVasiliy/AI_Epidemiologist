@@ -154,8 +154,14 @@ The main engineering principle is separation of responsibilities:
 ├── pyproject.toml
 ├── README.md
 ├── data/regions/          # local xlsx surveillance data (spb, samara, chelyabinsk)
+├── research/
+│   └── multistrain_calibration/  # multi-strain BR model: ports, experiments, results
 ├── docs/
-│   └── mechanistic_wave.md
+│   ├── age_groups.md
+│   ├── backtest.md
+│   ├── mechanistic_wave.md
+│   ├── review.md
+│   └── rscf_uncertainty.md
 ├── tests/
 ├── runs/
 │   ├── latest_narrators/
@@ -164,8 +170,11 @@ The main engineering principle is separation of responsibilities:
 └── src/
     └── ai4epi/
         ├── analysis/
+        │   ├── age_group_forecast.py # ML forecast by age group
         │   ├── age_group_season.py
         │   ├── analysis_pipeline.py
+        │   ├── backtest.py           # rolling weekly backtest
+        │   ├── data_quality.py       # data quality, baselines, reliability
         │   ├── context_builders.py
         │   ├── epidemic_waves.py
         │   ├── explainability.py
@@ -178,6 +187,7 @@ The main engineering principle is separation of responsibilities:
         │   ├── io.py
         │   └── sections.py
         ├── data/
+        │   ├── age_groups.py
         │   ├── influenza.py
         │   ├── local_excel.py
         │   └── weather.py
@@ -202,7 +212,7 @@ The main engineering principle is separation of responsibilities:
         └── cli.py
 ```
 
-The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format. (`runs/` is not included in this copy of the repository.)
+The checked-in `runs/` directory contains example artifacts from completed pipeline executions. It can be used to inspect the expected output structure and report-rendering format. (`runs/` is not included in this repository.)
 
 ---
 
@@ -259,6 +269,7 @@ run-analysis-tables
 run-analysis-local
 run-all
 run-all-local
+backtest-local
 generate-bulletin
 evaluate-bulletin
 render
@@ -371,10 +382,10 @@ If `--end-date` is omitted, the workflow uses the latest available surveillance 
 
 ### Offline run from local xlsx data
 
-`data/regions/<city>/{cases,pcr}.xlsx` (Saint Petersburg, Samara, Chelyabinsk, 2010 – Oct/Nov 2024) can be used without network access. Without a weather table the forecasting model is built without weather features.
+`data/regions/<city>/{cases,pcr}.xlsx` can be used without network access: Saint Petersburg, Samara, Chelyabinsk (2010 – Oct/Nov 2024) and Moscow, Novosibirsk, Omsk, Voronezh, Krasnodar (2010 – Jan/Feb 2021, converted from the raw RSCF_Uncertainty files with `scripts/convert_raw_regions.py`). `data/national/age_pcr_2017w40_2018w39.csv` holds age-specific PCR results for season 2017/18 (55 cities); where available, age-group series use age-specific positivity (see [docs/age_groups.md](docs/age_groups.md)). Without a weather table the forecasting model is built without weather features.
 
 ```bash
-ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --output-dir runs/spb_2019w04/analysis
+ai4epi run-analysis-local --city spb --end-date 2019-01-21 --mechanistic-wave --br-age-groups --age-forecast --output-dir runs/spb_2019w04/analysis
 ```
 
 ```bash
@@ -578,7 +589,7 @@ ai4epi run-analysis-source \
 
 ## Generated report structure
 
-The default report registry contains eight sections (two of them optional):
+The default report registry contains nine sections (three of them optional):
 
 | Section ID | Title | Purpose |
 |---|---|---|
@@ -586,7 +597,8 @@ The default report registry contains eight sections (two of them optional):
 | `epidemic_wave_comparison` | Epidemic-wave comparison | Comparison of recent epidemic waves by peak height, peak timing, width, and seasonal burden. |
 | `age_group_season_overview` | Age-group structure | Current-season age-group peak and burden analysis. |
 | `forecast_risks` | Forecast and risk assessment | Point forecast, uncertainty intervals, and risk interpretation. |
-| `mechanistic_wave` | Epidemic-wave phase (Baroyan–Rvachev) | Optional. Wave phase, expected peak and end of the main wave from the mechanistic model, and agreement with the ML forecast. Present only when the analysis ran with `--mechanistic-wave` and an epidemic rise was detected. |
+| `mechanistic_wave` | Epidemic-wave phase (Baroyan–Rvachev) | Optional. Wave phase, expected peak and end of the main wave from the mechanistic model, and agreement with the ML forecast. Present only when the analysis ran with `--mechanistic-wave` and an epidemic rise was detected. With `--br-age-groups` also covers the 0–14 / 15+ age groups. |
+| `age_group_forecast` | Forecast by age group | Optional (`--age-forecast`). ML forecast for the 0–14 and 15+ groups with intervals, skill against a naive forecast, and per-group agreement with the age-structured mechanistic model. |
 | `shap_interpretation` | Model interpretation | SHAP-based explanation of forecast drivers. |
 | `model_quality` | Model quality and limitations | Forecast metrics, error patterns, and practical constraints. |
 | `model_description` | Model description | Compact model card for the report. |
@@ -983,6 +995,18 @@ result.context.get_block("mechanistic_wave")["comparison_with_ml"]
 
 Details, defaults and differences from the original code: [docs/mechanistic_wave.md](docs/mechanistic_wave.md).
 
+Age groups (0–14 / 15+): a corrected age-structured Baroyan–Rvachev model (`--br-age-groups`) and a per-group ML forecast (`--age-forecast`), see [docs/age_groups.md](docs/age_groups.md).
+
+Data quality and baselines: every analysis run builds a `data_quality` block (share of weeks with imputed PCR data, New-Year weeks, skill of the forecast against naive and climatological baselines) and a reliability code `ok` / `reduced` / `low`; the forecast and model-quality sections must disclose reduced reliability (runtime rule `low_reliability_disclosed`).
+
+Defaults changed after the backtest: conformal intervals are scaled by the current level (`ForecastingConfig.interval_scaling="level"`; coverage of the 80 % interval on epidemic weeks 0.50 → 0.83) and HGB uses the fast setting (learning rate 0.03, 300 iterations; one analysis run 45 s → 5 s, same accuracy). The original settings: `interval_scaling="absolute"`, `legacy_point_config()`.
+
+Rolling backtest of the whole scheme (weekly retraining, intervals, Baroyan–Rvachev model, agreement rule): `ai4epi backtest-local --city spb --start 2018-05-07 --end 2019-04-29 --output-dir runs/backtest_spb`. Results: [docs/backtest.md](docs/backtest.md).
+
+Known weaknesses and the improvement plan: [docs/review.md](docs/review.md).
+
+Research: calibration of the multi-strain Baroyan–Rvachev model (why the RJNAMM 2021 calibration failed, six cities) — [research/multistrain_calibration](research/multistrain_calibration/README.md); what the RSCF_Uncertainty repository offers to the project — [docs/rscf_uncertainty.md](docs/rscf_uncertainty.md).
+
 ---
 
 ## Limitations
@@ -1019,7 +1043,7 @@ Important limitations:
 ```bash
 python -m pip install -e ".[dev,mechanistic]"
 python -m pytest                  # all tests, ~1 min
-python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~10 s
+python -m pytest -m "not slow"    # without MCMC and the full analysis pipeline, ~20 s
 ```
 
 ---

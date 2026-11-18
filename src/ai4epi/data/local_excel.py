@@ -18,7 +18,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -26,9 +28,11 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from ai4epi.data.age_pcr import CITY_TO_DISTRICT, attach_age_pcr, load_age_pcr
 from ai4epi.data.influenza import (
     INFLUENZA_CASES_SCHEMA,
     STRAIN_NAMES,
+    check_unsubtyped_a,
     weekly_incidence_from_cases,
 )
 
@@ -38,6 +42,11 @@ LOCAL_CITY_NAMES_RU: dict[str, str] = {
     "spb": "Санкт-Петербург",
     "samara": "Самара",
     "chelyabinsk": "Челябинск",
+    "moscow": "Москва",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+    "voronezh": "Воронеж",
+    "krasnodar": "Краснодар",
 }
 
 # Excel-заголовок -> имя столбца контракта ``cases``.
@@ -65,6 +74,10 @@ _DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 PcrGapPolicy = Literal["interpolate", "zero"]
 
 
+class PcrInconsistencyWarning(UserWarning):
+    """В выгрузке ПЦР положительных образцов больше, чем обследованных."""
+
+
 class LocalDataError(ValueError):
     """Локальные xlsx-файлы отсутствуют или не соответствуют формату."""
 
@@ -82,6 +95,23 @@ class LocalInfluenzaBundle:
     has_15_64_65_split: bool
     pcr_imputed_weeks: int
     pcr_gap_policy: str
+
+
+def city_meta(city: str, data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR) -> dict[str, str]:
+    """Описание города: ``<data_dir>/<city>/meta.json`` (``name_ru``, ``district``) поверх встроенных значений.
+
+    ``district`` — название города в общероссийских выгрузках (``DISTRICT_NAME``), по нему
+    подключается возрастная ПЦР. Для нового города достаточно положить meta.json рядом с xlsx.
+    """
+
+    meta = {"name_ru": LOCAL_CITY_NAMES_RU.get(city, city)}
+    if city in CITY_TO_DISTRICT:
+        meta["district"] = CITY_TO_DISTRICT[city]
+    path = Path(data_dir) / city / "meta.json"
+    if path.is_file():
+        meta.update({k: str(v) for k, v in json.loads(path.read_text(encoding="utf-8")).items()})
+    meta.setdefault("district", meta["name_ru"])
+    return meta
 
 
 def list_local_cities(data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR) -> list[str]:
@@ -115,6 +145,8 @@ def load_local_cases(
     *,
     data_dir: str | Path = DEFAULT_LOCAL_DATA_DIR,
     pcr_gap_policy: PcrGapPolicy = "interpolate",
+    end_date: date | datetime | str | None = None,
+    age_pcr_path: str | Path | Literal["auto"] | None = "auto",
 ) -> tuple[pd.DataFrame, int]:
     """Прочитать cases.xlsx + pcr.xlsx и привести к контракту ``cases``.
 
@@ -129,6 +161,12 @@ def load_local_cases(
       на такой неделе равна нулю.
 
     В обоих режимах отбрасываются последние недели без ПЦР (неполная выгрузка).
+    Если для города есть ПЦР по возрастам (``age_pcr_path``, см. ``ai4epi.data.age_pcr``),
+    к таблице добавляются столбцы ``age_pcr_tested_k`` / ``age_pcr_positive_k``; ``"auto"`` —
+    все ``age_pcr_*.csv`` каталога ``<data_dir>/../national``, ``None`` — не добавлять.
+    ``end_date`` обрезает ряд *до* обработки пропусков: интерполяция не
+    использует данные ПЦР недель после ``end_date`` (состояние «как было
+    известно на дату», без заглядывания вперёд).
     Возвращает таблицу и число отброшенных последних недель.
     """
 
@@ -148,7 +186,8 @@ def load_local_cases(
     cases = pd.DataFrame({"datetime": raw_cases["Дата"].map(week_start_from_label)})
     for source, target in CASES_COLUMNS.items():
         cases[target] = pd.to_numeric(raw_cases[source], errors="coerce") if source in raw_cases else float("nan")
-    city_name = LOCAL_CITY_NAMES_RU.get(city, city)
+    meta = city_meta(city, data_dir)
+    city_name = meta["name_ru"]
     cases.insert(1, "region_name", city_name)
     cases.insert(2, "district_name", city_name)
 
@@ -156,16 +195,32 @@ def load_local_cases(
     pcr["tested_total"] = pd.to_numeric(raw_pcr[PCR_TESTED_COLUMN], errors="coerce")
     for index, strain in STRAIN_NAMES.items():
         pcr[f"tested_strain_{index}"] = pd.to_numeric(raw_pcr[strain], errors="coerce")
+    check_unsubtyped_a(pcr, source=str(pcr_path))
 
     merged = cases.merge(pcr, on="datetime", how="left", validate="one_to_one")
     merged = merged.sort_values("datetime").reset_index(drop=True)
+    if end_date is not None:
+        merged = merged[merged["datetime"] <= pd.Timestamp(end_date)].reset_index(drop=True)
 
     dropped = 0
     while len(merged) and pd.isna(merged["tested_total"].iloc[-1]):
         merged = merged.iloc[:-1]
         dropped += 1
 
-    no_pcr = merged["tested_total"].isna() | (merged["tested_total"] <= 0)
+    # положительных по одному штамму больше, чем обследованных, — ошибка выгрузки (например, Москва
+    # 2016-05-02: 1 обследованный, 23 положительных на B): такая неделя считается неделей без ПЦР, иначе доля
+    # > 1 даёт ложный пик гриппа. Сумма по штаммам может законно превышать число обследованных (смешанные
+    # инфекции, A без субтипа — см. check_unsubtyped_a), поэтому проверяется максимум.
+    positives = merged[[f"tested_strain_{i}" for i in STRAIN_NAMES]].max(axis=1)
+    inconsistent = (merged["tested_total"] > 0) & (positives > merged["tested_total"])
+    if inconsistent.any():
+        warnings.warn(
+            f"{pcr_path}: положительных по штамму больше, чем обследованных, в {int(inconsistent.sum())} нед. "
+            f"({', '.join(merged.loc[inconsistent, 'datetime'].dt.date.astype(str))}); эти недели считаются без ПЦР.",
+            PcrInconsistencyWarning,
+            stacklevel=2,
+        )
+    no_pcr = merged["tested_total"].isna() | (merged["tested_total"] <= 0) | inconsistent
     tested = merged["tested_total"].where(~no_pcr)
     for index in STRAIN_NAMES:
         merged[f"rel_strain_{index}"] = merged[f"tested_strain_{index}"] / tested
@@ -184,6 +239,10 @@ def load_local_cases(
         ).round()
     merged = merged.drop(columns=["tested_total", *[f"tested_strain_{i}" for i in STRAIN_NAMES]])
     merged = merged.reset_index(drop=True)
+    if age_pcr_path == "auto":
+        age_pcr_path = Path(data_dir).parent / "national"
+    if age_pcr_path is not None:
+        merged = attach_age_pcr(merged, load_age_pcr(city, path=age_pcr_path, district=meta["district"]))
     INFLUENZA_CASES_SCHEMA.validate_dataframe(merged, name="influenza_cases")
     return merged, dropped
 
@@ -202,11 +261,9 @@ def load_local_influenza(
     ``end_date`` позволяет воспроизвести состояние системы на прошлую неделю.
     """
 
-    cases, dropped = load_local_cases(city, data_dir=data_dir, pcr_gap_policy=pcr_gap_policy)
+    cases, dropped = load_local_cases(city, data_dir=data_dir, pcr_gap_policy=pcr_gap_policy, end_date=end_date)
     if start_date is not None:
         cases = cases[cases["datetime"] >= pd.Timestamp(start_date)]
-    if end_date is not None:
-        cases = cases[cases["datetime"] <= pd.Timestamp(end_date)]
     cases = cases.reset_index(drop=True)
     if cases.empty:
         raise LocalDataError(f"Для города {city!r} нет данных в заданном интервале дат.")
@@ -216,7 +273,7 @@ def load_local_influenza(
     has_split = bool(cases[["sars_cases_age_group_4", "sars_cases_age_group_5"]].notna().any().all())
     return LocalInfluenzaBundle(
         city=city,
-        city_name_ru=LOCAL_CITY_NAMES_RU.get(city, city),
+        city_name_ru=city_meta(city, data_dir)["name_ru"],
         cases=cases,
         weekly=weekly,
         source_dir=Path(data_dir) / city,
@@ -233,6 +290,8 @@ __all__ = [
     "LocalDataError",
     "LocalInfluenzaBundle",
     "PcrGapPolicy",
+    "PcrInconsistencyWarning",
+    "city_meta",
     "list_local_cities",
     "load_local_cases",
     "load_local_influenza",
