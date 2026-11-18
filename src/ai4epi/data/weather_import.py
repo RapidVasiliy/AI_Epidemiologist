@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import gzip
 import io
 import re
 from pathlib import Path
@@ -54,11 +55,33 @@ def _find(columns: list[str], names: tuple[str, ...], *, prefix: bool = False) -
     return None
 
 
-def _read_table(path: Path) -> pd.DataFrame:
-    """Таблица с заголовком; строки-комментарии rp5 (``#``) и строки до заголовка пропускаются."""
+def _decode(data: bytes) -> str:
+    """rp5 отдаёт UTF-8, ANSI (cp1251) и «Unicode» (UTF-16 с BOM)."""
 
-    if path.suffix.lower() in {".xls", ".xlsx"}:
-        raw = pd.read_excel(path, header=None, dtype=object)
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16")
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise WeatherImportError("неизвестная кодировка.")  # pragma: no cover
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    """Таблица с заголовком; строки-комментарии rp5 (``#``) и строки до заголовка пропускаются.
+
+    Файлы ``.gz`` (как их отдаёт rp5) читаются без распаковки.
+    """
+
+    data = path.read_bytes()
+    suffixes = [s.lower() for s in path.suffixes]
+    if suffixes and suffixes[-1] == ".gz":
+        data = gzip.decompress(data)
+        suffixes = suffixes[:-1]
+    kind = suffixes[-1] if suffixes else ""
+    if kind in {".xls", ".xlsx"}:
+        raw = pd.read_excel(io.BytesIO(data), header=None, dtype=object)
         header_row = next(
             (i for i in range(min(len(raw), 40)) if _find([str(v) for v in raw.iloc[i]], _TIME_NAMES, prefix=True)),
             None,
@@ -68,15 +91,7 @@ def _read_table(path: Path) -> pd.DataFrame:
         table = raw.iloc[header_row + 1 :].copy()
         table.columns = [str(v) for v in raw.iloc[header_row]]
         return table.reset_index(drop=True)
-    text = path.read_bytes()
-    for encoding in ("utf-8-sig", "cp1251"):
-        try:
-            decoded = text.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    else:  # pragma: no cover
-        raise WeatherImportError(f"{path}: неизвестная кодировка.")
+    decoded = _decode(data)
     lines = [ln for ln in decoded.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     if not lines:
         raise WeatherImportError(f"{path}: файл пуст.")

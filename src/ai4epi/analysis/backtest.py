@@ -483,17 +483,32 @@ def render_backtest_report(metrics: JsonObject) -> str:
 class LocalDataAt:
     """``data_at`` для локальных xlsx: ряд «как известно на неделю t» (picklable)."""
 
-    def __init__(self, city: str, data_dir: str | Path, pcr_gap_policy: Literal["interpolate", "zero"] = "interpolate") -> None:
+    def __init__(
+        self,
+        city: str,
+        data_dir: str | Path,
+        pcr_gap_policy: Literal["interpolate", "zero"] = "interpolate",
+        weather_weekly: str | Path | None = None,
+    ) -> None:
         self.city = city
         self.data_dir = str(data_dir)
         self.pcr_gap_policy = pcr_gap_policy
+        self.weather_weekly = str(weather_weekly) if weather_weekly is not None else None
 
     def __call__(self, origin: pd.Timestamp) -> pd.DataFrame:
         from ai4epi.data.local_excel import load_local_influenza
 
-        return load_local_influenza(
+        weekly = load_local_influenza(
             self.city, data_dir=self.data_dir, end_date=origin, pcr_gap_policy=self.pcr_gap_policy
         ).weekly
+        if self.weather_weekly is None:
+            return weekly
+        from ai4epi.analysis.preprocessing import merge_weekly_influenza_weather
+
+        weather = pd.read_csv(self.weather_weekly, parse_dates=["week_start"])
+        # ряд заболеваемости обрезается до периода, покрытого погодой (погодные признаки без пропусков)
+        covered = weekly["datetime"].between(weather["week_start"].min(), weather["week_start"].max())
+        return merge_weekly_influenza_weather(weekly[covered].reset_index(drop=True), weather)
 
 
 __all__ = [

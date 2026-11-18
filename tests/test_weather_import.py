@@ -48,3 +48,13 @@ def test_fill_short_gaps_and_drop_empty_humidity(tmp_path):
     assert "rh_mean" not in out.columns
     assert out.loc[out.week_start == weeks[3], "temp_mean"].item() == 3.0  # короткий разрыв заполнен
     assert long_gaps == [(weeks[7].date().isoformat(), weeks[10].date().isoformat())]
+
+
+def test_rp5_unicode_gz(tmp_path):
+    import gzip
+
+    src = _rp5_csv(tmp_path / "rp5.csv")
+    gz = tmp_path / "26063.ru.unic.csv.gz"
+    gz.write_bytes(gzip.compress(src.read_text(encoding="utf-8").encode("utf-16")))  # rp5 «Unicode» = UTF-16 с BOM
+    weekly = convert_weather_exports([gz])
+    assert len(weekly) == 2 and weekly["n_hours"].tolist() == [56, 56]
