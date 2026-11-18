@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -71,6 +72,10 @@ PCR_TESTED_COLUMN = "Число образцов тестированных на
 _DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
 
 PcrGapPolicy = Literal["interpolate", "zero"]
+
+
+class PcrInconsistencyWarning(UserWarning):
+    """В выгрузке ПЦР положительных образцов больше, чем обследованных."""
 
 
 class LocalDataError(ValueError):
@@ -202,7 +207,20 @@ def load_local_cases(
         merged = merged.iloc[:-1]
         dropped += 1
 
-    no_pcr = merged["tested_total"].isna() | (merged["tested_total"] <= 0)
+    # положительных по одному штамму больше, чем обследованных, — ошибка выгрузки (например, Москва
+    # 2016-05-02: 1 обследованный, 23 положительных на B): такая неделя считается неделей без ПЦР, иначе доля
+    # > 1 даёт ложный пик гриппа. Сумма по штаммам может законно превышать число обследованных (смешанные
+    # инфекции, A без субтипа — см. check_unsubtyped_a), поэтому проверяется максимум.
+    positives = merged[[f"tested_strain_{i}" for i in STRAIN_NAMES]].max(axis=1)
+    inconsistent = (merged["tested_total"] > 0) & (positives > merged["tested_total"])
+    if inconsistent.any():
+        warnings.warn(
+            f"{pcr_path}: положительных по штамму больше, чем обследованных, в {int(inconsistent.sum())} нед. "
+            f"({', '.join(merged.loc[inconsistent, 'datetime'].dt.date.astype(str))}); эти недели считаются без ПЦР.",
+            PcrInconsistencyWarning,
+            stacklevel=2,
+        )
+    no_pcr = merged["tested_total"].isna() | (merged["tested_total"] <= 0) | inconsistent
     tested = merged["tested_total"].where(~no_pcr)
     for index in STRAIN_NAMES:
         merged[f"rel_strain_{index}"] = merged[f"tested_strain_{index}"] / tested
@@ -272,6 +290,7 @@ __all__ = [
     "LocalDataError",
     "LocalInfluenzaBundle",
     "PcrGapPolicy",
+    "PcrInconsistencyWarning",
     "city_meta",
     "list_local_cities",
     "load_local_cases",

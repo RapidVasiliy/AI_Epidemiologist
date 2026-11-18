@@ -60,8 +60,15 @@ def test_unsubtyped_a_check():
     from ai4epi.data.influenza import StrainDoubleCountWarning, check_unsubtyped_a
 
     weeks = 20
-    ok = pd.DataFrame({"tested_total": [100] * weeks, "tested_strain_0": [0, 1] * 10,
-                       "tested_strain_1": [5] * weeks, "tested_strain_2": [3] * weeks, "tested_strain_3": [2] * weeks})
+    ok = pd.DataFrame(
+        {
+            "tested_total": [100] * weeks,
+            "tested_strain_0": [0, 1] * 10,
+            "tested_strain_1": [5] * weeks,
+            "tested_strain_2": [3] * weeks,
+            "tested_strain_3": [2] * weeks,
+        }
+    )
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         res = check_unsubtyped_a(ok)
@@ -82,3 +89,17 @@ def test_real_spb_pcr_has_unsubtyped_a(data_dir):
 
         for city in ("spb", "samara", "chelyabinsk"):
             load_local_cases(city, data_dir=data_dir, age_pcr_path=None)
+
+
+def test_inconsistent_pcr_week_treated_as_gap():
+    """Москва 2016-05-02: в выгрузке 1 обследованный и 27 положительных — неделя без ПЦР, не пик."""
+
+    from ai4epi.data.local_excel import PcrInconsistencyWarning
+
+    with pytest.warns(PcrInconsistencyWarning, match="2016-05-02"):
+        bundle = load_local_influenza("moscow", data_dir="data/regions")
+    cases = bundle.cases.set_index("datetime")
+    rel = cases[[f"rel_strain_{i}" for i in range(4)]]
+    assert (rel <= 1).all().all()
+    assert bool(cases.loc[pd.Timestamp("2016-05-02"), "pcr_imputed"])
+    assert bundle.weekly["inc_per_10k"].max() < 200
