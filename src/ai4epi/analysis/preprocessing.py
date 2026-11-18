@@ -122,6 +122,11 @@ class FeatureEngineeringConfig(StrictModel):
     # Прогнозы ARIMA с гармониками годового цикла на 1..H недель как признаки arima_h1..arima_hH
     # (ai4epi.analysis.baselines.harmonic_arima_feature_matrix)
     arima_features: bool = False
+    # Признаки ОРВИ (нужны столбцы ari_per_10k и ari_norm, ai4epi.data.ari_history.add_ari_columns):
+    # log(1 + ОРВИ на 10 тыс.) с лагами ari_lags, рост за 1 и 2 недели и отклонение от многолетней
+    # нормы этой недели ari_anom (лаги 0..2). Сами столбцы ari_per_10k / ari_norm признаками не являются.
+    ari_features: bool = False
+    ari_lags: tuple[int, ...] = (0, 1, 2, 3)
     holiday_features: bool = False
     holiday_iso_weeks: tuple[int, ...] = (1,)
     epidemic_dynamics_eps: float = Field(default=1e-6, gt=0)
@@ -682,6 +687,26 @@ def add_holiday_features(
     return out
 
 
+ARI_RAW_COLUMNS: tuple[str, ...] = ("ari_per_10k", "ari_norm")
+
+
+def add_ari_features(data: pd.DataFrame, lags: Sequence[int] = (0, 1, 2, 3)) -> pd.DataFrame:
+    """Признаки ОРВИ: ``ari_lag_k`` = log(1 + ОРВИ), ``ari_growth_1/2``, ``ari_anom_lag_k`` (k = 0..2).
+
+    Отклонение от нормы при её отсутствии (меньше 3 прошлых лет) — 0: строка не теряется.
+    """
+
+    _require_columns(data, list(ARI_RAW_COLUMNS), frame_name="model input frame (ari_features)")
+    out = data.copy()
+    z = np.log1p(pd.to_numeric(out["ari_per_10k"], errors="coerce").clip(lower=0))
+    anom = (z - pd.to_numeric(out["ari_norm"], errors="coerce")).fillna(0.0)
+    anom = anom.where(z.notna())
+    new = {f"ari_lag_{k}": z.shift(k) for k in lags}
+    new |= {f"ari_growth_{k}": z - z.shift(k) for k in (1, 2)}
+    new |= {f"ari_anom_lag_{k}": anom.shift(k) for k in (0, 1, 2)}
+    return pd.concat([out, pd.DataFrame(new, index=out.index)], axis=1)
+
+
 def build_supervised(
     df: pd.DataFrame,
     *,
@@ -745,6 +770,9 @@ def build_supervised(
         for h in range(cfg.horizons):
             data[f"arima_h{h + 1}"] = arima[:, h]
 
+    if cfg.ari_features:
+        data = add_ari_features(data, cfg.ari_lags)
+
     if cfg.holiday_features:
         data = add_holiday_features(
             data,
@@ -766,6 +794,7 @@ def build_supervised(
         cfg.datetime_col,
         cfg.target_col,
         "y_observed",
+        *ARI_RAW_COLUMNS,
         *cfg.raw_columns_to_drop,
         *target_cols,
     }

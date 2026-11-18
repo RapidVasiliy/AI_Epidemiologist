@@ -407,6 +407,12 @@ def _add_backtest_local_command(subparsers: argparse._SubParsersAction[argparse.
     parser.add_argument("--br-method", choices=("mcmc", "abc", "optuna", "annealing", "bootstrap", "nuts"), default="mcmc", help="Метод калибровки модели БР.")
     parser.add_argument("--br-kernel", choices=("br", "seir"), default="br", help="Профиль заразности: Барояна–Рвачёва или SEIR.")
     parser.add_argument("--weather-weekly", default=None, type=Path, help="Недельная погода (scripts/convert_weather_export.py): модель строится с температурными признаками.")
+    parser.add_argument(
+        "--ari",
+        choices=("off", "own", "history"),
+        default="off",
+        help="Признаки ОРВИ: own — по cases.xlsx; history — норма ещё и по ari_history.csv (scripts/convert_ari_history.py).",
+    )
     parser.add_argument("--legacy-variant", action="store_true", help="Дополнительно оценить исходный HGB (learning_rate 0.001, 8000 итераций).")
     parser.add_argument("--warmup-weeks", type=int, default=52, help="Недели разогрева для конформных интервалов (не входят в метрики).")
     parser.add_argument("--pcr-gap-policy", choices=("interpolate", "zero"), default="interpolate", help="Недели без ПЦР.")
@@ -435,10 +441,12 @@ def _cmd_backtest_local(args: argparse.Namespace) -> int:
     )
     truth = load_local_influenza(args.city, data_dir=args.data_dir, pcr_gap_policy=args.pcr_gap_policy).weekly
     result = run_backtest(
-        LocalDataAt(args.city, args.data_dir, args.pcr_gap_policy, weather_weekly=args.weather_weekly),
+        LocalDataAt(args.city, args.data_dir, args.pcr_gap_policy, weather_weekly=args.weather_weekly, ari=args.ari),
         truth,
         config=cfg,
-        feature_config=FeatureEngineeringConfig() if args.weather_weekly else None,
+        feature_config=FeatureEngineeringConfig(
+            temp_cols=("temp_mean",) if args.weather_weekly else (), ari_features=args.ari != "off"
+        ),
         output_dir=args.output_dir,
         label=f"{args.city}, {args.start} – {args.end}",
     )

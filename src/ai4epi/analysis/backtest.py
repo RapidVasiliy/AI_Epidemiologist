@@ -489,7 +489,11 @@ class LocalDataAt:
         data_dir: str | Path,
         pcr_gap_policy: Literal["interpolate", "zero"] = "interpolate",
         weather_weekly: str | Path | None = None,
+        ari: Literal["off", "own", "history"] = "off",
     ) -> None:
+        """``ari``: «own» — столбцы ОРВИ по cases.xlsx; «history» — норма ещё и по ari_history.csv города."""
+
+        self.ari = ari
         self.city = city
         self.data_dir = str(data_dir)
         self.pcr_gap_policy = pcr_gap_policy
@@ -498,9 +502,15 @@ class LocalDataAt:
     def __call__(self, origin: pd.Timestamp) -> pd.DataFrame:
         from ai4epi.data.local_excel import load_local_influenza
 
-        weekly = load_local_influenza(
+        bundle = load_local_influenza(
             self.city, data_dir=self.data_dir, end_date=origin, pcr_gap_policy=self.pcr_gap_policy
-        ).weekly
+        )
+        weekly = bundle.weekly
+        if self.ari != "off":
+            from ai4epi.data.ari_history import add_ari_columns, load_ari_history
+
+            history = load_ari_history(bundle.source_dir) if self.ari == "history" else None
+            weekly = add_ari_columns(weekly, bundle.cases, history)
         if self.weather_weekly is None:
             return weekly
         from ai4epi.analysis.preprocessing import merge_weekly_influenza_weather
