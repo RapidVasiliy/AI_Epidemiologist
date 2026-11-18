@@ -181,7 +181,9 @@ class MechanisticWaveConfig(StrictModel):
     # (таблица ``br_conformal_path``, см. ai4epi.analysis.br_conformal); "model" — 5–95 % пучка.
     # Без таблицы используется пучок и выдаётся предупреждение.
     br_band: Literal["conformal", "model"] = "conformal"
-    br_conformal_path: Path | None = DEFAULT_BR_CONFORMAL_PATH
+    # None — таблица по ядру модели: data/calibration/br_conformal.json (БР) или
+    # br_conformal_seir.json (SEIR); ошибки прогноза у ядер разные, таблицы не взаимозаменяемы.
+    br_conformal_path: Path | None = None
     # --- бутстреп (method="bootstrap", как в RSCF_Uncertainty) ---------------
     # Число синтетических рядов (= число траекторий пучка). Полоса q05–q95:
     # "predictive" — траектории перекалиброванных параметров + шум наблюдений
@@ -232,6 +234,13 @@ class MechanisticWaveConfig(StrictModel):
                 infectious_shape=self.seir_infectious_shape,
             )
         return np.asarray(DEFAULT_INFECTIVITY_PROFILE, dtype=float)
+
+    def conformal_table_path(self) -> Path:
+        if self.br_conformal_path is not None:
+            return Path(self.br_conformal_path)
+        if self.model_kernel == "seir":
+            return DEFAULT_BR_CONFORMAL_PATH.with_name("br_conformal_seir.json")
+        return DEFAULT_BR_CONFORMAL_PATH
 
     def resolved_incidence(self) -> str:
         if self.incidence != "auto":
@@ -613,10 +622,11 @@ def build_mechanistic_wave_context(
             "от значения модели на этой неделе."
         )
     band_type = _band_type(calibration, cfg)
-    conformal_table = load_br_conformal(cfg.br_conformal_path) if cfg.br_band == "conformal" else None
+    conformal_path = cfg.conformal_table_path()
+    conformal_table = load_br_conformal(conformal_path) if cfg.br_band == "conformal" else None
     if cfg.br_band == "conformal" and conformal_table is None:
         warnings.append(
-            f"Таблица конформной полосы модели БР не найдена ({cfg.br_conformal_path}); показан 5–95 % пучка траекторий, "
+            f"Таблица конформной полосы модели не найдена ({conformal_path}); показан 5–95 % пучка траекторий, "
             "он сильно недооценивает неопределённость."
         )
     if conformal_table is not None:

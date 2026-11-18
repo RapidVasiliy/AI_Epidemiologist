@@ -139,3 +139,12 @@ def test_conformal_band_used_in_context(tmp_path, synthetic_weekly):
     )
     assert missing.context_block["band_type"] is None
     assert any("конформной полосы" in w for w in missing.warnings)
+
+
+def test_conformal_table_selected_by_kernel(tmp_path):
+    from ai4epi.analysis.br_conformal import DEFAULT_BR_CONFORMAL_PATH
+
+    assert MechanisticWaveConfig().conformal_table_path() == DEFAULT_BR_CONFORMAL_PATH
+    assert MechanisticWaveConfig(model_kernel="seir").conformal_table_path().name == "br_conformal_seir.json"
+    custom = tmp_path / "t.json"
+    assert MechanisticWaveConfig(model_kernel="seir", br_conformal_path=custom).conformal_table_path() == custom
