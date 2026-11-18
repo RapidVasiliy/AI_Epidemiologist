@@ -6,6 +6,9 @@
 * **архив rp5.ru** («Расписание погоды»: «Архив погоды» → «Скачать», формат xls/xlsx или csv): строки
   с ``#`` в начале — комментарии, первая колонка «Местное время в <город>» (``дд.мм.гггг чч:мм``),
   колонки ``T`` — температура, °C, ``U`` — относительная влажность, %; срочные наблюдения раз в 3 часа;
+* **месячные архивы meteo9.ru** (``archive_<id>_<месяц>_<год>.csv``): без заголовка, ``;``-разделитель,
+  колонки «дата дд/мм/гггг; день недели; время ч:мм; температура; облачность; давление; влажность; ...»,
+  почасовые наблюдения; файлы за разные месяцы передаются вместе;
 * **произвольная таблица** CSV / Excel: столбец даты или времени (``date``, ``datetime``, ``time``,
   ``дата``, ``время``, ...), температура (``temp``, ``t``, ``tmean``, ``температура`` ...), по желанию
   влажность (``rh``, ``u``, ``humidity``, ``влажность``) и суточные минимум / максимум (``tmin`` / ``tmax``).
@@ -68,6 +71,20 @@ def _decode(data: bytes) -> str:
     raise WeatherImportError("неизвестная кодировка.")  # pragma: no cover
 
 
+def _peek_lines(path: Path, n: int = 5) -> list[str]:
+    """Первые строки текстового файла (для распознавания формата); для Excel — пусто."""
+
+    data = path.read_bytes()
+    if path.suffix.lower() == ".gz":
+        data = gzip.decompress(data)
+    if data[:4] == b"\xd0\xcf\x11\xe0" or data[:2] == b"PK":  # xls / xlsx
+        return []
+    try:
+        return [ln for ln in _decode(data[:20000]).splitlines() if ln.strip()][:n]
+    except (WeatherImportError, UnicodeDecodeError):
+        return []
+
+
 def _read_table(path: Path) -> pd.DataFrame:
     """Таблица с заголовком; строки-комментарии rp5 (``#``) и строки до заголовка пропускаются.
 
@@ -96,7 +113,20 @@ def _read_table(path: Path) -> pd.DataFrame:
     if not lines:
         raise WeatherImportError(f"{path}: файл пуст.")
     sep = ";" if lines[0].count(";") >= lines[0].count(",") else ","
-    return pd.read_csv(io.StringIO("\n".join(lines)), sep=sep, dtype=str, index_col=False)
+    # в поле облачности METAR-архивов rp5 изредка попадает HTML (<span style="...;">) — его «;» и кавычки
+    # ломают разбор; теги вычищаются, а строки с лишними полями обрезаются до длины заголовка
+    lines = [_HTML_TAG.sub("", ln) if "<" in ln else ln for ln in lines]
+    return pd.read_csv(
+        io.StringIO("\n".join(lines)),
+        sep=sep,
+        dtype=str,
+        index_col=False,
+        engine="python",
+        on_bad_lines=lambda bad: bad[: lines[0].count(sep) + 1],
+    )
+
+
+_HTML_TAG = re.compile(r"<[^<>]*>")
 
 
 def _to_number(series: pd.Series) -> pd.Series:
@@ -104,17 +134,41 @@ def _to_number(series: pd.Series) -> pd.Series:
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+_METEO9_ROW = re.compile(r'^"?\d{2}/\d{2}/\d{4}"?;"?[^;]*"?;"?\d{1,2}:\d{2}"?;')
+
+
+def _read_meteo9(lines: list[str]) -> pd.DataFrame:
+    rows = [ln.split(";") for ln in lines if _METEO9_ROW.match(ln)]
+    frame = pd.DataFrame([[c.strip().strip('"') for c in r] for r in rows])
+    out = pd.DataFrame({"time": pd.to_datetime(frame[0] + " " + frame[2], format="%d/%m/%Y %H:%M", errors="coerce")})
+    out["temp"] = _to_number(frame[3])
+    out["rh"] = _to_number(frame[6])
+    return out
+
+
 def read_weather_export(path: str | Path) -> pd.DataFrame:
     """Наблюдения с колонками ``time``, ``temp`` и, если есть, ``rh``, ``tmin``, ``tmax``."""
 
     path = Path(path)
+    head = _peek_lines(path)
+    if head and all(_METEO9_ROW.match(ln) for ln in head[:3]):
+        data = path.read_bytes()
+        if path.suffix.lower() == ".gz":
+            data = gzip.decompress(data)
+        out = _read_meteo9(_decode(data).splitlines())
+        out = out.dropna(subset=["time", "temp"]).sort_values("time").drop_duplicates("time").reset_index(drop=True)
+        if out.empty:
+            raise WeatherImportError(f"{path}: не удалось разобрать архив meteo9.")
+        return out
     table = _read_table(path)
     columns = list(table.columns)
     time_col = _find(columns, _TIME_NAMES, prefix=True)
     temp_col = _find(columns, _TEMP_NAMES)
     if time_col is None or temp_col is None:
         raise WeatherImportError(f"{path}: нужны столбцы даты/времени и температуры; найдены: {columns[:12]}.")
-    out = pd.DataFrame({"time": pd.to_datetime(table[time_col].astype(str).str.strip(), dayfirst=True, errors="coerce")})
+    out = pd.DataFrame(
+        {"time": pd.to_datetime(table[time_col].astype(str).str.strip(), dayfirst=True, errors="coerce")}
+    )
     out["temp"] = _to_number(table[temp_col])
     for key, names in (("rh", _RH_NAMES), ("tmin", _TMIN_NAMES), ("tmax", _TMAX_NAMES)):
         col = _find(columns, names)
